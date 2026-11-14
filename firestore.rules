@@ -1,0 +1,260 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net: deny everything unless explicitly permitted below
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidTimestamp(ts) {
+      return ts is timestamp && ts <= request.time;
+    }
+
+    function isValidRiskConfig(data, userId) {
+      return data.keys().hasAll([
+               'userId', 'accountBalanceUsd', 'riskPerTradePct', 'maxOpenRiskPct',
+               'maxClusterRiskPct', 'maxOpenPerInstrument', 'dailyLossLimitPct',
+               'weeklyLossLimitPct', 'drawdownHalvePct', 'drawdownHaltPct',
+               'maxCostToStopRatio', 'minLiquidationStops', 'newsBlackoutBeforeMin',
+               'newsBlackoutAfterMin', 'feedMaxLagSeconds', 'manualKillSwitch',
+               'createdAt', 'updatedAt'
+             ]) &&
+             data.keys().hasOnly([
+               'userId', 'accountBalanceUsd', 'riskPerTradePct', 'maxOpenRiskPct',
+               'maxClusterRiskPct', 'maxOpenPerInstrument', 'dailyLossLimitPct',
+               'weeklyLossLimitPct', 'drawdownHalvePct', 'drawdownHaltPct',
+               'maxCostToStopRatio', 'minLiquidationStops', 'newsBlackoutBeforeMin',
+               'newsBlackoutAfterMin', 'feedMaxLagSeconds', 'manualKillSwitch',
+               'createdAt', 'updatedAt'
+             ]) &&
+             data.userId is string && data.userId == userId &&
+             data.accountBalanceUsd is number && data.accountBalanceUsd > 0 && data.accountBalanceUsd <= 100000000 &&
+             data.riskPerTradePct is number && data.riskPerTradePct >= 0.1 && data.riskPerTradePct <= 2.0 &&
+             data.maxOpenRiskPct is number && data.maxOpenRiskPct >= 0.5 && data.maxOpenRiskPct <= 5.0 &&
+             data.maxClusterRiskPct is number && data.maxClusterRiskPct >= 0.5 && data.maxClusterRiskPct <= 5.0 &&
+             data.maxOpenPerInstrument is int && data.maxOpenPerInstrument >= 1 && data.maxOpenPerInstrument <= 5 &&
+             data.dailyLossLimitPct is number && data.dailyLossLimitPct >= 0.5 && data.dailyLossLimitPct <= 10.0 &&
+             data.weeklyLossLimitPct is number && data.weeklyLossLimitPct >= 1.0 && data.weeklyLossLimitPct <= 20.0 &&
+             data.drawdownHalvePct is number && data.drawdownHalvePct >= 1.0 && data.drawdownHalvePct <= 20.0 &&
+             data.drawdownHaltPct is number && data.drawdownHaltPct >= 2.0 && data.drawdownHaltPct <= 30.0 &&
+             data.maxCostToStopRatio is number && data.maxCostToStopRatio >= 0.01 && data.maxCostToStopRatio <= 0.5 &&
+             data.minLiquidationStops is int && data.minLiquidationStops >= 1 && data.minLiquidationStops <= 10 &&
+             data.newsBlackoutBeforeMin is int && data.newsBlackoutBeforeMin >= 0 && data.newsBlackoutBeforeMin <= 180 &&
+             data.newsBlackoutAfterMin is int && data.newsBlackoutAfterMin >= 0 && data.newsBlackoutAfterMin <= 180 &&
+             data.feedMaxLagSeconds is int && data.feedMaxLagSeconds >= 5 && data.feedMaxLagSeconds <= 600 &&
+             data.manualKillSwitch is bool &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isTerminalSignalStatus(status) {
+      return status in ['WIN', 'LOSS', 'BREAKEVEN', 'EXPIRED', 'CANCELLED'];
+    }
+
+    function isValidSignal(data, userId) {
+      return data.keys().hasAll([
+               'userId', 'signalUuid', 'createdAtIso', 'instrument', 'assetClass',
+               'direction', 'strategy', 'strategyVersion', 'configHash', 'timeframe',
+               'regime', 'conviction', 'entryType', 'entryLow', 'entryHigh', 'stopLoss',
+               'tp1Price', 'tp1R', 'tp1ClosePct', 'tp2Price', 'tp2R', 'tp2ClosePct',
+               'suggestedRiskPct', 'estCostR', 'expiresAtIso', 'invalidation', 'rationale',
+               'riskStatus', 'riskAdjustments', 'riskReasons', 'idempotencyKey',
+               'executionMode', 'status', 'realizedR', 'maeR', 'mfeR',
+               'durationMinutes', 'createdAt', 'updatedAt'
+             ]) &&
+             data.keys().hasOnly([
+               'userId', 'signalUuid', 'createdAtIso', 'instrument', 'assetClass',
+               'direction', 'strategy', 'strategyVersion', 'configHash', 'timeframe',
+               'regime', 'conviction', 'entryType', 'entryLow', 'entryHigh', 'stopLoss',
+               'tp1Price', 'tp1R', 'tp1ClosePct', 'tp2Price', 'tp2R', 'tp2ClosePct',
+               'suggestedRiskPct', 'estCostR', 'expiresAtIso', 'invalidation', 'rationale',
+               'riskStatus', 'riskAdjustments', 'riskReasons', 'idempotencyKey',
+               'executionMode', 'status', 'realizedR', 'maeR', 'mfeR',
+               'durationMinutes', 'createdAt', 'updatedAt'
+             ]) &&
+             data.userId is string && data.userId == userId &&
+             data.signalUuid is string && data.signalUuid.size() >= 8 && data.signalUuid.size() <= 64 &&
+             data.createdAtIso is string && data.createdAtIso.size() >= 10 && data.createdAtIso.size() <= 40 &&
+             data.instrument is string && data.instrument.size() >= 3 && data.instrument.size() <= 24 &&
+             data.assetClass in ['fx', 'crypto'] &&
+             data.direction in ['long', 'short'] &&
+             data.strategy is string && data.strategy.size() >= 2 && data.strategy.size() <= 64 &&
+             data.strategyVersion is string && data.strategyVersion.size() >= 1 && data.strategyVersion.size() <= 24 &&
+             data.configHash is string && data.configHash.size() >= 4 && data.configHash.size() <= 64 &&
+             data.timeframe is string && data.timeframe.size() >= 2 && data.timeframe.size() <= 16 &&
+             data.regime is string && data.regime.size() >= 2 && data.regime.size() <= 32 &&
+             data.conviction is number && data.conviction >= 0.0 && data.conviction <= 1.0 &&
+             data.entryType is string && data.entryType.size() >= 2 && data.entryType.size() <= 24 &&
+             data.entryLow is number && data.entryLow > 0 &&
+             data.entryHigh is number && data.entryHigh >= data.entryLow &&
+             data.stopLoss is number && data.stopLoss > 0 &&
+             data.tp1Price is number && data.tp1Price > 0 &&
+             data.tp1R is number && data.tp1R >= 0 &&
+             data.tp1ClosePct is int && data.tp1ClosePct >= 0 && data.tp1ClosePct <= 100 &&
+             data.tp2Price is number && data.tp2Price > 0 &&
+             data.tp2R is number && data.tp2R >= 0 &&
+             data.tp2ClosePct is int && data.tp2ClosePct >= 0 && data.tp2ClosePct <= 100 &&
+             data.suggestedRiskPct is number && data.suggestedRiskPct >= 0.0 && data.suggestedRiskPct <= 2.0 &&
+             data.estCostR is number && data.estCostR >= 0.0 && data.estCostR <= 2.0 &&
+             data.expiresAtIso is string && data.expiresAtIso.size() >= 10 && data.expiresAtIso.size() <= 40 &&
+             data.invalidation is string && data.invalidation.size() >= 2 && data.invalidation.size() <= 240 &&
+             data.rationale is string && data.rationale.size() >= 2 && data.rationale.size() <= 500 &&
+             data.riskStatus in ['APPROVED', 'REDUCED', 'REJECTED'] &&
+             data.riskAdjustments is list && data.riskAdjustments.size() <= 20 &&
+             (data.riskAdjustments.size() == 0 || data.riskAdjustments[0] is string) &&
+             data.riskReasons is list && data.riskReasons.size() <= 20 &&
+             (data.riskReasons.size() == 0 || data.riskReasons[0] is string) &&
+             data.idempotencyKey is string && data.idempotencyKey.size() >= 4 && data.idempotencyKey.size() <= 128 &&
+             data.executionMode in ['PAPER', 'LIVE'] &&
+             data.status in ['PENDING', 'TRIGGERED', 'TP1_HIT', 'WIN', 'LOSS', 'BREAKEVEN', 'EXPIRED', 'CANCELLED'] &&
+             data.realizedR is number && data.realizedR >= -50.0 && data.realizedR <= 100.0 &&
+             data.maeR is number && data.maeR >= -50.0 && data.maeR <= 50.0 &&
+             data.mfeR is number && data.mfeR >= -50.0 && data.mfeR <= 100.0 &&
+             data.durationMinutes is int && data.durationMinutes >= 0 && data.durationMinutes <= 525600 &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidSignalEvent(data, userId) {
+      return data.keys().hasAll([
+               'userId', 'signalId', 'sequenceIndex', 'eventType',
+               'timestampIso', 'payloadSummary', 'prevHash', 'eventHash', 'createdAt'
+             ]) &&
+             data.keys().hasOnly([
+               'userId', 'signalId', 'sequenceIndex', 'eventType',
+               'timestampIso', 'payloadSummary', 'prevHash', 'eventHash', 'createdAt'
+             ]) &&
+             data.userId is string && data.userId == userId &&
+             data.signalId is string && data.signalId.size() >= 1 && data.signalId.size() <= 128 &&
+             data.sequenceIndex is int && data.sequenceIndex >= 0 &&
+             data.eventType is string && data.eventType.size() >= 2 && data.eventType.size() <= 64 &&
+             data.timestampIso is string && data.timestampIso.size() >= 10 && data.timestampIso.size() <= 40 &&
+             data.payloadSummary is string && data.payloadSummary.size() >= 1 && data.payloadSummary.size() <= 1000 &&
+             data.prevHash is string && data.prevHash.size() == 64 &&
+             data.eventHash is string && data.eventHash.size() == 64 &&
+             isValidTimestamp(data.createdAt);
+    }
+
+    function isValidValidationReport(data, userId) {
+      return data.keys().hasAll([
+               'userId', 'strategyId', 'strategyVersion', 'configHash', 'dataSnapshotId',
+               'randomSeed', 'lifecycleStatus', 'trialCount', 'oosTrades', 'netExpectancyR',
+               'profitFactor', 'sharpe', 'deflatedSharpe', 'pbo', 'mc95DrawdownPct',
+               'ruinProbPct', 'positiveYearsPct', 'causalityPassed', 'beatRandom95th',
+               'failureReasons', 'equityCurveR', 'createdAt', 'updatedAt'
+             ]) &&
+             data.keys().hasOnly([
+               'userId', 'strategyId', 'strategyVersion', 'configHash', 'dataSnapshotId',
+               'randomSeed', 'lifecycleStatus', 'trialCount', 'oosTrades', 'netExpectancyR',
+               'profitFactor', 'sharpe', 'deflatedSharpe', 'pbo', 'mc95DrawdownPct',
+               'ruinProbPct', 'positiveYearsPct', 'causalityPassed', 'beatRandom95th',
+               'failureReasons', 'equityCurveR', 'createdAt', 'updatedAt'
+             ]) &&
+             data.userId is string && data.userId == userId &&
+             data.strategyId is string && data.strategyId.size() >= 2 && data.strategyId.size() <= 64 &&
+             data.strategyVersion is string && data.strategyVersion.size() >= 1 && data.strategyVersion.size() <= 24 &&
+             data.configHash is string && data.configHash.size() >= 4 && data.configHash.size() <= 64 &&
+             data.dataSnapshotId is string && data.dataSnapshotId.size() >= 2 && data.dataSnapshotId.size() <= 128 &&
+             data.randomSeed is int &&
+             data.lifecycleStatus in ['DRAFT', 'BACKTESTED', 'PAPER', 'LIVE', 'SUSPENDED', 'REJECTED'] &&
+             data.trialCount is int && data.trialCount >= 1 && data.trialCount <= 10000 &&
+             data.oosTrades is int && data.oosTrades >= 0 && data.oosTrades <= 100000 &&
+             data.netExpectancyR is number &&
+             data.profitFactor is number &&
+             data.sharpe is number &&
+             data.deflatedSharpe is number &&
+             data.pbo is number && data.pbo >= 0.0 && data.pbo <= 1.0 &&
+             data.mc95DrawdownPct is number && data.mc95DrawdownPct >= 0.0 &&
+             data.ruinProbPct is number && data.ruinProbPct >= 0.0 && data.ruinProbPct <= 100.0 &&
+             data.positiveYearsPct is number && data.positiveYearsPct >= 0.0 && data.positiveYearsPct <= 100.0 &&
+             data.causalityPassed is bool &&
+             data.beatRandom95th is bool &&
+             data.failureReasons is list && data.failureReasons.size() <= 30 &&
+             (data.failureReasons.size() == 0 || data.failureReasons[0] is string) &&
+             data.equityCurveR is list && data.equityCurveR.size() <= 500 &&
+             (data.equityCurveR.size() == 0 || data.equityCurveR[0] is number) &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow list, create, update, delete: if false;
+
+      match /risk_config/{configId} {
+        allow get: if isOwner(userId) && isValidId(configId);
+        allow list: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(configId) && isValidRiskConfig(incoming(), userId);
+        allow update: if isOwner(userId) && isValidId(configId) &&
+                         isValidRiskConfig(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt;
+        allow delete: if false;
+      }
+
+      match /signals/{signalId} {
+        allow get: if isOwner(userId) && isValidId(signalId);
+        allow list: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(signalId) && isValidSignal(incoming(), userId);
+        allow update: if isOwner(userId) && isValidId(signalId) &&
+                         isValidSignal(incoming(), userId) &&
+                         !isTerminalSignalStatus(existing().status) &&
+                         incoming().userId == existing().userId &&
+                         incoming().signalUuid == existing().signalUuid &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().instrument == existing().instrument &&
+                         incoming().direction == existing().direction &&
+                         incoming().strategy == existing().strategy &&
+                         incoming().entryLow == existing().entryLow &&
+                         incoming().entryHigh == existing().entryHigh &&
+                         incoming().stopLoss == existing().stopLoss &&
+                         incoming().idempotencyKey == existing().idempotencyKey &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'status', 'realizedR', 'maeR', 'mfeR', 'durationMinutes', 'updatedAt'
+                         ]);
+        allow delete: if false;
+      }
+
+      match /signal_events/{eventId} {
+        allow get: if isOwner(userId) && isValidId(eventId);
+        allow list: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(eventId) && isValidSignalEvent(incoming(), userId);
+        allow update, delete: if false;
+      }
+
+      match /strategy_reports/{reportId} {
+        allow get: if isOwner(userId) && isValidId(reportId);
+        allow list: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(reportId) && isValidValidationReport(incoming(), userId);
+        allow update: if isOwner(userId) && isValidId(reportId) &&
+                         isValidValidationReport(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().strategyId == existing().strategyId &&
+                         incoming().createdAt == existing().createdAt;
+        allow delete: if false;
+      }
+    }
+  }
+}

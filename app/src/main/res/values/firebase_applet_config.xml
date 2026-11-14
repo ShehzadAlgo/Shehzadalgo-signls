@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<resources>
+    <string name="firestore_database_id" translatable="false">ai-studio-android-meridian-cedc0ec6-6cca-46f5-867e-da5993495544</string>
+    <string name="recaptcha_site_key" translatable="false">6LcAMCAuAAAAABzTGjbNxXgM2QAZuj6Td4yw4Y3f</string>
+</resources>

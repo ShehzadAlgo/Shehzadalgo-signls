@@ -1,0 +1,8 @@
+{
+  "name": "Remix Shehzad Algo",
+  "description": "Shehzad Algo: institutional-style Forex and Crypto multi-strategy quantitative signal, risk engine, tamper-evident ledger, and multi-AI desk platform.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

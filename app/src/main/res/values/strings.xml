@@ -1,0 +1,15 @@
+<resources>
+    <string name="app_name">Shehzad Algo</string>
+    <string name="cd_meridian_logo">Shehzad Algo quantitative signal platform emblem</string>
+    <string name="action_sign_in_google">Sign in with Google</string>
+    <string name="disclaimer_short">Not financial advice. Trading involves risk of loss. No auto-execution or custody.</string>
+    <string name="tab_signals">Signals</string>
+    <string name="tab_risk">Risk</string>
+    <string name="tab_ledger">Ledger</string>
+    <string name="tab_lab">Lab</string>
+    <string name="tab_ai">AI Hub</string>
+    <string name="action_scan_bars">Scan Closed Bars</string>
+    <string name="action_import_csv">Import CSV</string>
+    <string name="action_verify_chain">Verify Hash Chain</string>
+    <string name="action_run_validation">Run Validation</string>
+</resources>
