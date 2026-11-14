@@ -1,11 +1,18 @@
 package com.example
 
+import android.Manifest
+import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -72,11 +79,15 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.example.data.ai.AiSettingsStore
+import com.example.data.ai.MarketSentimentState
 import com.example.data.firestore.MeridianLedgerRepository
 import com.example.data.market.MarketDataClient
 import com.example.domain.model.ExecutionMode
+import com.example.domain.model.SignalStatus
 import com.example.domain.model.Timeframe
 import com.example.quant.TelegramFormatter
+import com.example.service.LiveMarketMonitorService
+import com.example.service.NotificationHelper
 import com.example.ui.auth.AuthScreen
 import com.example.ui.auth.authStateFlow
 import com.example.ui.auth.configureAppCheck
@@ -88,6 +99,8 @@ import com.example.ui.screens.RiskScreen
 import com.example.ui.screens.SignalsScreen
 import com.example.ui.theme.BearCrimson
 import com.example.ui.theme.BearCrimsonTint
+import com.example.ui.theme.BullEmerald
+import com.example.ui.theme.BullEmeraldTint
 import com.example.ui.theme.GraphiteSurface
 import com.example.ui.theme.InkPrimary
 import com.example.ui.theme.InkSecondary
@@ -205,12 +218,59 @@ fun MeridianTerminalShell(
     val liveDetails by viewModel.liveValidationDetails.collectAsStateWithLifecycle()
     val chainVerification by viewModel.chainVerification.collectAsStateWithLifecycle()
     val snackbarMessage by viewModel.snackbarMessage.collectAsStateWithLifecycle()
+    val live24hVmEnabled by viewModel.live24hEnabled.collectAsStateWithLifecycle()
+    val serviceRunning by LiveMarketMonitorService.isRunningFlow.collectAsStateWithLifecycle()
+    val live24hEnabled = live24hVmEnabled || serviceRunning
+    val activeRiskAlerts by viewModel.activeRiskAlerts.collectAsStateWithLifecycle()
+
+    val verificationsByKey by aiViewModel.verificationsBySignalKey.collectAsStateWithLifecycle()
+    val sentimentState by aiViewModel.sentimentState.collectAsStateWithLifecycle()
+    val pairAnalysisState by aiViewModel.pairAnalysisState.collectAsStateWithLifecycle()
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (!granted) {
+            scope.launch {
+                // In-app Snackbars still operate even if OS tray permission is declined
+            }
+        }
+    }
+
+    val toggleLiveMonitor: (Boolean) -> Unit = { enable ->
+        if (enable && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !NotificationHelper.hasNotificationPermission(context)) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        viewModel.setLive24hEnabled(enable)
+        val svcIntent = Intent(context, LiveMarketMonitorService::class.java).apply {
+            action = if (enable) LiveMarketMonitorService.ACTION_START else LiveMarketMonitorService.ACTION_STOP
+        }
+        runCatching {
+            if (enable) {
+                ContextCompat.startForegroundService(context, svcIntent)
+            } else {
+                context.startService(svcIntent)
+            }
+        }
+    }
 
     val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(snackbarMessage) {
         val msg = snackbarMessage ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(msg)
         viewModel.clearSnackbar()
+    }
+
+    LaunchedEffect(viewModel) {
+        NotificationHelper.ensureChannels(context)
+        viewModel.localNotifications.collect { notif ->
+            val notifId = (notif.id.hashCode() and 0x7FFF) + if (notif.isRiskAlert) 8000 else 5000
+            if (notif.isRiskAlert) {
+                NotificationHelper.postRiskAlertNotification(context, notifId, notif.title, notif.body)
+            } else {
+                NotificationHelper.postSignalNotification(context, notifId, notif.title, notif.body)
+            }
+        }
     }
 
     val handleCsvUri: (String, Timeframe, Uri) -> Unit = { symbol, tf, uri ->
@@ -241,15 +301,25 @@ fun MeridianTerminalShell(
                         ) {
                             Text("SHEHZAD ALGO", style = MaterialTheme.typography.titleLarge)
                             Text(
-                                text = if (riskConfig.manualKillSwitch) "HALTED" else "PAPER DESK",
+                                text = if (riskConfig.manualKillSwitch) "HALTED" else if (live24hEnabled) "24H LIVE" else "PAPER DESK",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = if (riskConfig.manualKillSwitch) BearCrimson else MeridianTeal,
+                                color = when {
+                                    riskConfig.manualKillSwitch -> BearCrimson
+                                    live24hEnabled -> BullEmerald
+                                    else -> MeridianTeal
+                                },
                                 modifier = Modifier
                                     .background(
-                                        if (riskConfig.manualKillSwitch) BearCrimsonTint else MeridianTealTint,
+                                        when {
+                                            riskConfig.manualKillSwitch -> BearCrimsonTint
+                                            live24hEnabled -> BullEmeraldTint
+                                            else -> MeridianTealTint
+                                        },
                                         RoundedCornerShape(4.dp)
                                     )
+                                    .clickable { toggleLiveMonitor(!live24hEnabled) }
                                     .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    .testTag("topbar_live_24h_button")
                             )
                         }
                     },
@@ -368,12 +438,37 @@ fun MeridianTerminalShell(
                             riskConfig = riskConfig,
                             qualityIssues = qualityIssues,
                             candlesBySymbol = candlesBySymbol,
+                            spotRates = spotRates,
+                            verificationsBySignalKey = verificationsByKey,
+                            pairAnalysisState = pairAnalysisState,
+                            live24hEnabled = live24hEnabled,
+                            onToggleLive24h = toggleLiveMonitor,
                             onScanClosedBars = { viewModel.scanClosedBarsUniverse() },
                             onUpdateStatus = { sig, st, r -> viewModel.updateSignalStatus(sig, st, r) },
                             onImportCsv = handleCsvUri,
+                            onVerifySignalWithAi = { sig, analytics ->
+                                aiViewModel.verifySignalAsTrader(sig, analytics, deskContext)
+                            },
                             onAnalyzeWithAi = { sig ->
                                 pendingAiPrompt = "Analyze this signal setup in detail (entry/stop/TP, R-multiple, estimated cost, regime fit, and invalidation):\n\n" +
                                     TelegramFormatter.formatSignal(sig)
+                                activeTab = MeridianTab.AI_HUB
+                            },
+                            onAnalyzePairWithAi = { rawSym, tf ->
+                                aiViewModel.analyzeSearchedPairWithAi(
+                                    rawQuery = rawSym,
+                                    timeframe = tf,
+                                    riskConfig = riskConfig,
+                                    spotRates = spotRates,
+                                    deskContext = deskContext
+                                )
+                            },
+                            onClearPairAnalysis = { aiViewModel.clearPairAnalysis() },
+                            onOpenPairInAiChat = { res ->
+                                pendingAiPrompt = "Deep-dive pro trader analysis for ${res.symbol} (${res.timeframe.wire}):\n" +
+                                    "Bias=${res.bias.displayLabel} (${res.confidenceScore}%), Spot=${res.currentPrice}, Entry=${res.suggestedEntryLow}-${res.suggestedEntryHigh}, " +
+                                    "Vol-SL=${res.volatilityAdjustedStopLoss}, TP1=${res.takeProfit1}, TP2=${res.takeProfit2}, ATR14=${res.atr14}, RSI=${res.rsi14}, ADX=${res.adx14}.\n" +
+                                    "Review key invalidation triggers and multi-timeframe execution."
                                 activeTab = MeridianTab.AI_HUB
                             },
                             onShowMessage = { msg ->
@@ -381,13 +476,39 @@ fun MeridianTerminalShell(
                             }
                         )
 
-                        MeridianTab.RISK -> RiskScreen(
-                            riskConfig = riskConfig,
-                            signals = allSignals,
-                            spotRates = spotRates,
-                            qualityIssues = qualityIssues,
-                            viewModel = viewModel
-                        )
+                        MeridianTab.RISK -> {
+                            val openRiskPct = remember(allSignals) {
+                                allSignals.filter { SignalStatus.fromWire(it.status).isOpen }
+                                    .sumOf { it.suggestedRiskPct }
+                            }
+                            LaunchedEffect(activeTab) {
+                                if (sentimentState is MarketSentimentState.Idle) {
+                                    aiViewModel.refreshMarketSentiment(
+                                        riskConfig = riskConfig,
+                                        openRiskPct = openRiskPct
+                                    )
+                                }
+                            }
+                            RiskScreen(
+                                riskConfig = riskConfig,
+                                signals = allSignals,
+                                spotRates = spotRates,
+                                qualityIssues = qualityIssues,
+                                viewModel = viewModel,
+                                candlesBySymbol = candlesBySymbol,
+                                sentimentState = sentimentState,
+                                activeRiskAlerts = activeRiskAlerts,
+                                live24hEnabled = live24hEnabled,
+                                onToggleLive24h = toggleLiveMonitor,
+                                onDismissRiskAlert = { viewModel.dismissRiskAlert(it) },
+                                onRefreshSentiment = {
+                                    aiViewModel.refreshMarketSentiment(
+                                        riskConfig = riskConfig,
+                                        openRiskPct = openRiskPct
+                                    )
+                                }
+                            )
+                        }
 
                         MeridianTab.LEDGER -> LedgerScreen(
                             signals = allSignals,
@@ -410,6 +531,11 @@ fun MeridianTerminalShell(
                         MeridianTab.AI_HUB -> AiHubScreen(
                             aiViewModel = aiViewModel,
                             deskContext = deskContext,
+                            signals = allSignals,
+                            candlesBySymbol = candlesBySymbol,
+                            riskConfig = riskConfig,
+                            spotRates = spotRates,
+                            qualityIssues = qualityIssues,
                             initialPrompt = pendingAiPrompt,
                             onConsumeInitialPrompt = { pendingAiPrompt = null },
                             onShowMessage = { msg ->

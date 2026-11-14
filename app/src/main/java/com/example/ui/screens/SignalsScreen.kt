@@ -52,6 +52,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -67,6 +69,10 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.example.R
+import com.example.data.ai.AiPairAnalysisResult
+import com.example.data.ai.AiVerificationState
+import com.example.data.ai.PairAiAnalysisState
+import com.example.data.ai.VerificationVerdict
 import com.example.data.firestore.SignalRecord
 import com.example.domain.model.Candle
 import com.example.domain.model.DataQualityIssue
@@ -74,7 +80,12 @@ import com.example.domain.model.InstrumentUniverse
 import com.example.domain.model.RiskConfig
 import com.example.domain.model.SignalStatus
 import com.example.domain.model.Timeframe
+import com.example.quant.MarketAnalyticsEngine
+import com.example.quant.MarketAnalyticsSnapshot
 import com.example.quant.TelegramFormatter
+import com.example.ui.components.AiVerificationScorecard
+import com.example.ui.components.MarketAnalyticsCard
+import com.example.ui.components.PairSearchAndAiPanel
 import com.example.ui.components.SignalCandleChart
 import com.example.ui.theme.BearCrimson
 import com.example.ui.theme.BearCrimsonTint
@@ -94,6 +105,7 @@ import com.example.ui.theme.ObsidianBg
 import com.example.ui.theme.SlateCard
 import com.example.ui.theme.WarnAmber
 import com.example.ui.theme.WarnAmberTint
+import com.example.ui.viewmodel.AiHubViewModel
 import com.example.ui.viewmodel.ScanStatus
 import com.example.ui.viewmodel.UiState
 
@@ -105,14 +117,24 @@ fun SignalsScreen(
     riskConfig: RiskConfig,
     qualityIssues: List<DataQualityIssue>,
     candlesBySymbol: Map<String, List<Candle>>,
+    spotRates: Map<String, Double> = emptyMap(),
+    verificationsBySignalKey: Map<String, AiVerificationState> = emptyMap(),
+    pairAnalysisState: PairAiAnalysisState = PairAiAnalysisState.Idle,
+    live24hEnabled: Boolean = false,
+    onToggleLive24h: (Boolean) -> Unit = {},
     onScanClosedBars: () -> Unit,
     onUpdateStatus: (SignalRecord, SignalStatus, Double) -> Unit,
     onImportCsv: (String, Timeframe, Uri) -> Unit,
+    onVerifySignalWithAi: (SignalRecord, MarketAnalyticsSnapshot) -> Unit = { _, _ -> },
     onAnalyzeWithAi: (SignalRecord) -> Unit,
+    onAnalyzePairWithAi: (String, Timeframe) -> Unit = { _, _ -> },
+    onClearPairAnalysis: () -> Unit = {},
+    onOpenPairInAiChat: (AiPairAnalysisResult) -> Unit = {},
     onShowMessage: (String) -> Unit
 ) {
     val context = LocalContext.current
     var selectedFilter by remember { mutableStateOf("ALL") }
+    var searchQuery by remember { mutableStateOf("") }
     var selectedSignal by remember { mutableStateOf<SignalRecord?>(null) }
 
     val csvLauncher = rememberLauncherForActivityResult(
@@ -124,13 +146,23 @@ fun SignalsScreen(
     }
 
     val allSignals = (signalsState as? UiState.Success)?.data.orEmpty()
-    val filteredSignals = remember(allSignals, selectedFilter) {
-        when (selectedFilter) {
+    val filteredSignals = remember(allSignals, selectedFilter, searchQuery) {
+        val base = when (selectedFilter) {
             "OPEN" -> allSignals.filter { SignalStatus.fromWire(it.status).isOpen }
             "FX" -> allSignals.filter { it.assetClass == "fx" }
             "CRYPTO" -> allSignals.filter { it.assetClass == "crypto" }
             "CLOSED" -> allSignals.filter { SignalStatus.fromWire(it.status).isTerminal }
             else -> allSignals
+        }
+        val cleanSearch = searchQuery.trim()
+        if (cleanSearch.isEmpty()) {
+            base
+        } else {
+            base.filter {
+                it.instrument.contains(cleanSearch, ignoreCase = true) ||
+                    it.strategy.contains(cleanSearch, ignoreCase = true) ||
+                    it.direction.contains(cleanSearch, ignoreCase = true)
+            }
         }
     }
 
@@ -141,7 +173,8 @@ fun SignalsScreen(
             LazyColumn(
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxHeight(),
+                    .fillMaxHeight()
+                    .testTag("signals_lazy_column"),
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
@@ -149,9 +182,22 @@ fun SignalsScreen(
                     TerminalScanHeader(
                         scanStatus = scanStatus,
                         riskConfig = riskConfig,
+                        live24hEnabled = live24hEnabled,
                         blockingIssuesCount = qualityIssues.count { it.blocksSignals },
+                        onToggleLive24h = onToggleLive24h,
                         onScanClick = onScanClosedBars,
                         onImportCsvClick = { csvLauncher.launch(arrayOf("text/*", "text/csv", "application/octet-stream")) }
+                    )
+                }
+
+                item {
+                    PairSearchAndAiPanel(
+                        searchQuery = searchQuery,
+                        onSearchQueryChange = { searchQuery = it },
+                        pairAnalysisState = pairAnalysisState,
+                        onAnalyzePairWithAi = onAnalyzePairWithAi,
+                        onClearPairAnalysis = onClearPairAnalysis,
+                        onOpenFullAiChat = onOpenPairInAiChat
                     )
                 }
 
@@ -241,9 +287,11 @@ fun SignalsScreen(
                             }
                         } else {
                             items(filteredSignals, key = { it.id.ifBlank { it.signalUuid } }) { sig ->
+                                val vState = verificationsBySignalKey[AiHubViewModel.signalKeyFor(sig)]
                                 SignalCard(
                                     signal = sig,
                                     isSelected = selectedSignal?.id == sig.id,
+                                    verificationState = vState,
                                     onClick = { selectedSignal = sig }
                                 )
                             }
@@ -263,6 +311,11 @@ fun SignalsScreen(
 
             if (isWide && selectedSignal != null) {
                 val active = allSignals.firstOrNull { it.id == selectedSignal?.id } ?: selectedSignal!!
+                val activeCandles = candlesBySymbol[active.instrument].orEmpty()
+                val activeAnalytics = remember(active, activeCandles, riskConfig, allSignals, spotRates, qualityIssues) {
+                    MarketAnalyticsEngine.compute(active, activeCandles, riskConfig, allSignals, spotRates, qualityIssues)
+                }
+                val activeVerification = verificationsBySignalKey[AiHubViewModel.signalKeyFor(active)] ?: AiVerificationState.Idle
                 Column(
                     modifier = Modifier
                         .weight(1f)
@@ -274,8 +327,11 @@ fun SignalsScreen(
                 ) {
                     SignalDetailContent(
                         signal = active,
-                        candles = candlesBySymbol[active.instrument].orEmpty(),
+                        candles = activeCandles,
+                        analytics = activeAnalytics,
+                        verificationState = activeVerification,
                         onUpdateStatus = { st, r -> onUpdateStatus(active, st, r) },
+                        onVerifyWithAi = { onVerifySignalWithAi(active, activeAnalytics) },
                         onAnalyzeWithAi = { onAnalyzeWithAi(active) },
                         onCopyTelegram = {
                             copyToClipboard(context, TelegramFormatter.formatSignal(active))
@@ -288,6 +344,11 @@ fun SignalsScreen(
 
         if (!isWide && selectedSignal != null) {
             val active = allSignals.firstOrNull { it.id == selectedSignal?.id } ?: selectedSignal!!
+            val activeCandles = candlesBySymbol[active.instrument].orEmpty()
+            val activeAnalytics = remember(active, activeCandles, riskConfig, allSignals, spotRates, qualityIssues) {
+                MarketAnalyticsEngine.compute(active, activeCandles, riskConfig, allSignals, spotRates, qualityIssues)
+            }
+            val activeVerification = verificationsBySignalKey[AiHubViewModel.signalKeyFor(active)] ?: AiVerificationState.Idle
             val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
             ModalBottomSheet(
                 onDismissRequest = { selectedSignal = null },
@@ -302,11 +363,14 @@ fun SignalsScreen(
                 ) {
                     SignalDetailContent(
                         signal = active,
-                        candles = candlesBySymbol[active.instrument].orEmpty(),
+                        candles = activeCandles,
+                        analytics = activeAnalytics,
+                        verificationState = activeVerification,
                         onUpdateStatus = { st, r ->
                             onUpdateStatus(active, st, r)
                             selectedSignal = null
                         },
+                        onVerifyWithAi = { onVerifySignalWithAi(active, activeAnalytics) },
                         onAnalyzeWithAi = {
                             selectedSignal = null
                             onAnalyzeWithAi(active)
@@ -327,7 +391,9 @@ fun SignalsScreen(
 private fun TerminalScanHeader(
     scanStatus: ScanStatus,
     riskConfig: RiskConfig,
+    live24hEnabled: Boolean,
     blockingIssuesCount: Int,
+    onToggleLive24h: (Boolean) -> Unit,
     onScanClick: () -> Unit,
     onImportCsvClick: () -> Unit
 ) {
@@ -370,6 +436,37 @@ private fun TerminalScanHeader(
                         fg = MeridianTeal
                     )
                 }
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(GraphiteSurface, RoundedCornerShape(8.dp))
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = if (live24hEnabled) "24H LIVE ALERTS: ACTIVE" else "24H LIVE AUTO-ALERTS",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (live24hEnabled) BullEmerald else InkPrimary
+                    )
+                    Text(
+                        text = "Instant alerts when any pair fires a signal or approaches SL",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = InkSecondary
+                    )
+                }
+                Switch(
+                    checked = live24hEnabled,
+                    onCheckedChange = onToggleLive24h,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = ObsidianBg,
+                        checkedTrackColor = BullEmerald
+                    ),
+                    modifier = Modifier.testTag("live_24h_toggle")
+                )
             }
 
             Row(
@@ -423,6 +520,7 @@ private fun TerminalScanHeader(
 private fun SignalCard(
     signal: SignalRecord,
     isSelected: Boolean,
+    verificationState: AiVerificationState? = null,
     onClick: () -> Unit
 ) {
     val ins = InstrumentUniverse.find(signal.instrument)
@@ -518,6 +616,31 @@ private fun SignalCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = InkSecondary
             )
+
+            if (verificationState is AiVerificationState.Success) {
+                val res = verificationState.result
+                val (vBg, vFg) = when (res.verdict) {
+                    VerificationVerdict.HIGH_CONVICTION -> BullEmeraldTint to BullEmerald
+                    VerificationVerdict.PROCEED_WITH_CAUTION -> WarnAmberTint to WarnAmber
+                    VerificationVerdict.WAIT_OR_SKIP -> BearCrimsonTint to BearCrimson
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    StatusPill(
+                        text = "AI VERIFIED: ${res.verdict.displayLabel} (${res.confidenceScore}%)",
+                        bg = vBg,
+                        fg = vFg
+                    )
+                    Text(
+                        text = res.providerName,
+                        style = MonoMetricSmall,
+                        color = InkSecondary
+                    )
+                }
+            }
         }
     }
 }
@@ -526,7 +649,10 @@ private fun SignalCard(
 private fun SignalDetailContent(
     signal: SignalRecord,
     candles: List<Candle>,
+    analytics: MarketAnalyticsSnapshot,
+    verificationState: AiVerificationState,
     onUpdateStatus: (SignalStatus, Double) -> Unit,
+    onVerifyWithAi: () -> Unit,
     onAnalyzeWithAi: () -> Unit,
     onCopyTelegram: () -> Unit
 ) {
@@ -586,18 +712,16 @@ private fun SignalDetailContent(
             }
         }
 
-        Button(
-            onClick = onAnalyzeWithAi,
-            colors = ButtonDefaults.buttonColors(containerColor = MeridianTeal, contentColor = ObsidianBg),
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(48.dp)
-                .testTag("analyze_signal_ai_button")
-        ) {
-            Icon(Icons.Outlined.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(modifier = Modifier.width(8.dp))
-            Text("Analyze Setup with AI Hub", style = MaterialTheme.typography.titleMedium)
-        }
+        MarketAnalyticsCard(
+            analytics = analytics,
+            decimals = decimals
+        )
+
+        AiVerificationScorecard(
+            verificationState = verificationState,
+            onVerifyClick = onVerifyWithAi,
+            onOpenInAiHub = onAnalyzeWithAi
+        )
 
         OutlinedButton(
             onClick = onCopyTelegram,

@@ -22,6 +22,7 @@ import com.example.domain.model.RiskConfig
 import com.example.domain.model.RiskStatus
 import com.example.domain.model.SignalStatus
 import com.example.domain.model.Timeframe
+import com.example.quant.ActiveStopWatchTarget
 import com.example.quant.BacktestValidationResult
 import com.example.quant.BacktestEngine
 import com.example.quant.DataQualityChecker
@@ -29,21 +30,29 @@ import com.example.quant.HashChainUtils
 import com.example.quant.MarketContext
 import com.example.quant.OpenExposureItem
 import com.example.quant.PortfolioRiskState
+import com.example.quant.RiskAlertEvent
 import com.example.quant.RiskEngine
 import com.example.quant.SignalCombiner
+import com.example.quant.StopLossProximityMonitor
 import com.example.quant.StrategyRegistry
 import com.google.firebase.firestore.FirebaseFirestoreException
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.InputStream
 import java.time.Instant
@@ -76,6 +85,13 @@ data class ChainVerificationResult(
     val headHash: String,
     val brokenAtSequence: Long? = null,
     val message: String
+)
+
+data class LocalAlertNotification(
+    val id: String,
+    val isRiskAlert: Boolean,
+    val title: String,
+    val body: String
 )
 
 class MeridianViewModel(
@@ -153,9 +169,31 @@ class MeridianViewModel(
     private val _snackbarMessage = MutableStateFlow<String?>(null)
     val snackbarMessage: StateFlow<String?> = _snackbarMessage.asStateFlow()
 
+    private val _live24hEnabled = MutableStateFlow(false)
+    val live24hEnabled: StateFlow<Boolean> = _live24hEnabled.asStateFlow()
+
+    private val _activeRiskAlerts = MutableStateFlow<List<RiskAlertEvent>>(emptyList())
+    val activeRiskAlerts: StateFlow<List<RiskAlertEvent>> = _activeRiskAlerts.asStateFlow()
+
+    private val _dismissedAlertIds = MutableStateFlow<Set<String>>(emptySet())
+    private val _latestActiveSetup = MutableStateFlow<ActiveStopWatchTarget?>(null)
+
+    private val _localNotifications = MutableSharedFlow<LocalAlertNotification>(extraBufferCapacity = 24)
+    val localNotifications: SharedFlow<LocalAlertNotification> = _localNotifications.asSharedFlow()
+
+    private val alertedIdsThisSession = mutableSetOf<String>()
+    private var liveLoopJob: Job? = null
+
     init {
         viewModelScope.launch {
             _spotRates.value = marketClient.fetchSpotFxRatesUsd()
+        }
+        viewModelScope.launch {
+            signalsState.collect { st ->
+                if (st is UiState.Success) {
+                    evaluateRiskProximity(_latestActiveSetup.value)
+                }
+            }
         }
     }
 
@@ -163,9 +201,62 @@ class MeridianViewModel(
         _snackbarMessage.value = null
     }
 
+    fun setLive24hEnabled(enabled: Boolean) {
+        if (_live24hEnabled.value == enabled) return
+        _live24hEnabled.value = enabled
+        liveLoopJob?.cancel()
+        if (enabled) {
+            _snackbarMessage.value = "24H Live Monitor enabled — auto-scanning pairs for signals & SL alerts."
+            liveLoopJob = viewModelScope.launch {
+                while (isActive && _live24hEnabled.value) {
+                    scanClosedBarsUniverseAsync().join()
+                    delay(45_000L)
+                }
+            }
+        } else {
+            _snackbarMessage.value = "24H Live Monitor paused."
+        }
+    }
+
+    fun evaluateRiskProximity(activeTarget: ActiveStopWatchTarget? = _latestActiveSetup.value) {
+        _latestActiveSetup.value = activeTarget
+        val signals = (signalsState.value as? UiState.Success)?.data.orEmpty()
+        val alerts = StopLossProximityMonitor.evaluateOpenPositions(
+            signals = signals,
+            candlesBySymbol = _candlesBySymbol.value,
+            spotRates = _spotRates.value,
+            activeSetup = activeTarget
+        )
+        val dismissed = _dismissedAlertIds.value
+        val visible = alerts.filterNot { it.id in dismissed }
+        _activeRiskAlerts.value = visible
+
+        visible.firstOrNull { it.id !in alertedIdsThisSession }?.let { freshAlert ->
+            alertedIdsThisSession.add(freshAlert.id)
+            _snackbarMessage.value = "${freshAlert.title} — ${freshAlert.message}"
+            _localNotifications.tryEmit(
+                LocalAlertNotification(
+                    id = freshAlert.id,
+                    isRiskAlert = true,
+                    title = freshAlert.title,
+                    body = freshAlert.message
+                )
+            )
+        }
+    }
+
+    fun dismissRiskAlert(alertId: String) {
+        _dismissedAlertIds.value = _dismissedAlertIds.value + alertId
+        _activeRiskAlerts.value = _activeRiskAlerts.value.filterNot { it.id == alertId }
+    }
+
     fun scanClosedBarsUniverse() {
-        if (_scanStatus.value.isScanning) return
-        viewModelScope.launch {
+        scanClosedBarsUniverseAsync()
+    }
+
+    private fun scanClosedBarsUniverseAsync(): Job {
+        if (_scanStatus.value.isScanning) return viewModelScope.launch { }
+        return viewModelScope.launch {
             _scanStatus.value = _scanStatus.value.copy(
                 isScanning = true,
                 providerSummary = "Fetching closed bars from public FX & Crypto feeds...",
@@ -320,10 +411,24 @@ class MeridianViewModel(
                     val res = repository.publishSignalWithEvent(record)
                     if (res.isSuccess) {
                         openItems.add(OpenExposureItem(c.instrument, c.direction, decision.approvedRiskPct))
+                        val entryMid = (c.entryLow + c.entryHigh) / 2.0
+                        val alertTitle = "NEW SIGNAL: ${c.instrument.symbol} ${c.direction.name}"
+                        val alertBody = "${c.timeframe.wire} ${c.strategyId} • Entry ${"%.4f".format(entryMid)} | SL ${"%.4f".format(c.stopLoss)} | TP1 ${"%.4f".format(c.tp1Price)}"
+                        _snackbarMessage.value = "$alertTitle — $alertBody"
+                        _localNotifications.tryEmit(
+                            LocalAlertNotification(
+                                id = item.idempotencyKey,
+                                isRiskAlert = false,
+                                title = alertTitle,
+                                body = alertBody
+                            )
+                        )
                     } else {
                         diagnostics.add("Ledger write failed for ${c.instrument.symbol}: ${res.exceptionOrNull()?.localizedMessage}")
                     }
                 }
+
+                evaluateRiskProximity(_latestActiveSetup.value)
 
                 val summary = if (providersUsed.isEmpty()) {
                     "Scan completed with no live data feeds reachable"

@@ -5,16 +5,24 @@ import com.example.data.ai.AiChatMessage
 import com.example.data.ai.AiHubSettings
 import com.example.data.ai.AiProviderType
 import com.example.data.ai.AiSettingsStore
+import com.example.data.ai.AiSignalVerificationResult
 import com.example.data.ai.AiStreamChunk
+import com.example.data.ai.AiVerificationState
 import com.example.data.ai.ChatRole
+import com.example.data.ai.MarketSentimentState
 import com.example.data.ai.MultiAiEngine
+import com.example.data.ai.PairAiAnalysisState
 import com.example.data.firestore.SignalRecord
 import com.example.data.firestore.ValidationReportRecord
+import com.example.data.market.MarketDataClient
+import com.example.data.market.MarketNewsClient
 import com.example.domain.model.DataQualityIssue
 import com.example.domain.model.ExecutionMode
 import com.example.domain.model.LedgerStats
 import com.example.domain.model.RiskConfig
 import com.example.domain.model.SignalStatus
+import com.example.domain.model.Timeframe
+import com.example.quant.MarketAnalyticsSnapshot
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -34,7 +42,8 @@ private const val TAG = "AiHubViewModel"
 
 class AiHubViewModel(
     private val settingsStore: AiSettingsStore,
-    private val aiEngine: MultiAiEngine = MultiAiEngine()
+    private val aiEngine: MultiAiEngine = MultiAiEngine(),
+    private val newsClient: MarketNewsClient = MarketNewsClient()
 ) : ViewModel() {
 
     val settings: StateFlow<AiHubSettings> = settingsStore.settingsFlow
@@ -49,7 +58,18 @@ class AiHubViewModel(
     private val _errorBanner = MutableStateFlow<String?>(null)
     val errorBanner: StateFlow<String?> = _errorBanner.asStateFlow()
 
+    private val _verificationsBySignalKey = MutableStateFlow<Map<String, AiVerificationState>>(emptyMap())
+    val verificationsBySignalKey: StateFlow<Map<String, AiVerificationState>> = _verificationsBySignalKey.asStateFlow()
+
+    private val _sentimentState = MutableStateFlow<MarketSentimentState>(MarketSentimentState.Idle)
+    val sentimentState: StateFlow<MarketSentimentState> = _sentimentState.asStateFlow()
+
+    private val _pairAnalysisState = MutableStateFlow<PairAiAnalysisState>(PairAiAnalysisState.Idle)
+    val pairAnalysisState: StateFlow<PairAiAnalysisState> = _pairAnalysisState.asStateFlow()
+
     private var activeJob: Job? = null
+    private var sentimentJob: Job? = null
+    private var pairAnalysisJob: Job? = null
 
     fun selectProvider(provider: AiProviderType) {
         viewModelScope.launch {
@@ -159,6 +179,143 @@ class AiHubViewModel(
         }
     }
 
+    fun verifySignalAsTrader(
+        signal: SignalRecord,
+        analytics: MarketAnalyticsSnapshot,
+        deskContext: String?
+    ) {
+        val key = signalKeyFor(signal)
+        val currentState = _verificationsBySignalKey.value[key]
+        if (currentState is AiVerificationState.Verifying) return
+
+        val currentSettings = settings.value
+        val provider = currentSettings.selectedProvider
+        val model = currentSettings.activeModel(provider)
+        val apiKey = currentSettings.apiKey(provider)
+        val customUrl = currentSettings.customBaseUrl
+
+        _verificationsBySignalKey.value = _verificationsBySignalKey.value + (key to AiVerificationState.Verifying(key))
+
+        viewModelScope.launch {
+            try {
+                val result = aiEngine.verifySignalWithAi(
+                    provider = provider,
+                    modelName = model,
+                    apiKey = apiKey,
+                    customEndpoint = customUrl,
+                    signal = signal,
+                    analytics = analytics,
+                    deskContext = if (currentSettings.includeDeskContext) deskContext else null,
+                    signalKey = key
+                )
+                _verificationsBySignalKey.value = _verificationsBySignalKey.value + (key to AiVerificationState.Success(result))
+            } catch (e: CancellationException) {
+                _verificationsBySignalKey.value = _verificationsBySignalKey.value - key
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Signal verification failed for $key", e)
+                val msg = e.localizedMessage ?: "Signal verification failed."
+                _verificationsBySignalKey.value = _verificationsBySignalKey.value + (key to AiVerificationState.Error(key, msg))
+            }
+        }
+    }
+
+    fun refreshMarketSentiment(riskConfig: RiskConfig, openRiskPct: Double) {
+        if (_sentimentState.value is MarketSentimentState.Analyzing) return
+        val currentSettings = settings.value
+        val provider = currentSettings.selectedProvider
+        val model = currentSettings.activeModel(provider)
+        val apiKey = currentSettings.apiKey(provider)
+        val customUrl = currentSettings.customBaseUrl
+
+        _sentimentState.value = MarketSentimentState.Analyzing
+        sentimentJob?.cancel()
+        sentimentJob = viewModelScope.launch {
+            try {
+                val headlines = newsClient.fetchLatestCryptoAndForexNews()
+                val upcomingEvents = MarketDataClient().upcomingAndRecentMacroEvents(System.currentTimeMillis())
+                val report = aiEngine.analyzeMarketSentimentWithAi(
+                    provider = provider,
+                    modelName = model,
+                    apiKey = apiKey,
+                    customEndpoint = customUrl,
+                    headlines = headlines,
+                    upcomingEvents = upcomingEvents,
+                    riskConfig = riskConfig,
+                    openRiskPct = openRiskPct
+                )
+                _sentimentState.value = MarketSentimentState.Success(report)
+            } catch (e: CancellationException) {
+                if (_sentimentState.value is MarketSentimentState.Analyzing) {
+                    _sentimentState.value = MarketSentimentState.Idle
+                }
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Market sentiment refresh failed", e)
+                _sentimentState.value = MarketSentimentState.Error(
+                    e.localizedMessage ?: "Unable to analyze live news sentiment."
+                )
+            }
+        }
+    }
+
+    fun analyzeSearchedPairWithAi(
+        rawQuery: String,
+        timeframe: Timeframe,
+        riskConfig: RiskConfig,
+        spotRates: Map<String, Double>,
+        deskContext: String?
+    ) {
+        val clean = rawQuery.trim().uppercase()
+        if (clean.isEmpty()) return
+
+        val currentSettings = settings.value
+        val provider = currentSettings.selectedProvider
+        val model = currentSettings.activeModel(provider)
+        val apiKey = currentSettings.apiKey(provider)
+        val customUrl = currentSettings.customBaseUrl
+
+        _pairAnalysisState.value = PairAiAnalysisState.Analyzing(clean, timeframe)
+        pairAnalysisJob?.cancel()
+        pairAnalysisJob = viewModelScope.launch {
+            try {
+                val marketClient = MarketDataClient()
+                val bundle = marketClient.fetchAnyPairBundle(clean, timeframe, limit = 240)
+                if (bundle.candles.isEmpty()) {
+                    _pairAnalysisState.value = PairAiAnalysisState.Error(
+                        symbol = clean,
+                        message = bundle.errorMessage ?: "No closed-bar market feed available for $clean."
+                    )
+                    return@launch
+                }
+                val result = aiEngine.analyzeAnyPairWithAi(
+                    provider = provider,
+                    modelName = model,
+                    apiKey = apiKey,
+                    customEndpoint = customUrl,
+                    bundle = bundle,
+                    riskConfig = riskConfig,
+                    spotRates = spotRates,
+                    deskContext = if (currentSettings.includeDeskContext) deskContext else null
+                )
+                _pairAnalysisState.value = PairAiAnalysisState.Success(result, bundle.candles.filter { it.isClosed })
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "AI pair analysis failed for $clean", e)
+                _pairAnalysisState.value = PairAiAnalysisState.Error(
+                    symbol = clean,
+                    message = e.localizedMessage ?: "Unable to complete AI analysis for $clean."
+                )
+            }
+        }
+    }
+
+    fun clearPairAnalysis() {
+        pairAnalysisJob?.cancel()
+        _pairAnalysisState.value = PairAiAnalysisState.Idle
+    }
+
     private fun updateAssistantMessage(id: String, content: String, streaming: Boolean, error: Boolean) {
         _messages.value = _messages.value.map { msg ->
             if (msg.id == id) {
@@ -170,6 +327,8 @@ class AiHubViewModel(
     }
 
     companion object {
+        fun signalKeyFor(signal: SignalRecord): String =
+            signal.id.ifBlank { signal.signalUuid }.ifBlank { signal.idempotencyKey }
         fun buildDeskContextSnapshot(
             signals: List<SignalRecord>,
             riskConfig: RiskConfig,

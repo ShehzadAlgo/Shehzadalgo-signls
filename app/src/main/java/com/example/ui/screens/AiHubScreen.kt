@@ -75,9 +75,18 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.ai.AiChatMessage
 import com.example.data.ai.AiHubSettings
 import com.example.data.ai.AiProviderType
+import com.example.data.ai.AiVerificationState
 import com.example.data.ai.ChatRole
 import com.example.data.ai.WebAiPortal
 import com.example.data.ai.WebAiPortals
+import com.example.data.firestore.SignalRecord
+import com.example.domain.model.Candle
+import com.example.domain.model.DataQualityIssue
+import com.example.domain.model.RiskConfig
+import com.example.domain.model.SignalStatus
+import com.example.quant.MarketAnalyticsEngine
+import com.example.ui.components.AiVerificationScorecard
+import com.example.ui.components.MarketAnalyticsCard
 import com.example.ui.theme.BearCrimson
 import com.example.ui.theme.BearCrimsonTint
 import com.example.ui.theme.BullEmerald
@@ -102,6 +111,11 @@ import com.example.ui.viewmodel.AiHubViewModel
 fun AiHubScreen(
     aiViewModel: AiHubViewModel,
     deskContext: String,
+    signals: List<SignalRecord> = emptyList(),
+    candlesBySymbol: Map<String, List<Candle>> = emptyMap(),
+    riskConfig: RiskConfig = RiskConfig(),
+    spotRates: Map<String, Double> = emptyMap(),
+    qualityIssues: List<DataQualityIssue> = emptyList(),
     initialPrompt: String?,
     onConsumeInitialPrompt: () -> Unit,
     onShowMessage: (String) -> Unit
@@ -111,10 +125,17 @@ fun AiHubScreen(
     val messages by aiViewModel.messages.collectAsStateWithLifecycle()
     val isGenerating by aiViewModel.isGenerating.collectAsStateWithLifecycle()
     val errorBanner by aiViewModel.errorBanner.collectAsStateWithLifecycle()
+    val verificationsByKey by aiViewModel.verificationsBySignalKey.collectAsStateWithLifecycle()
 
     var inputText by remember { mutableStateOf("") }
     var showConfigSheet by remember { mutableStateOf(false) }
-    var showWebPortals by remember { mutableStateOf(true) }
+    var showWebPortals by remember { mutableStateOf(false) }
+    var selectedVerifySignalKey by remember(signals) {
+        mutableStateOf(
+            signals.firstOrNull { SignalStatus.fromWire(it.status).isOpen }?.let(AiHubViewModel::signalKeyFor)
+                ?: signals.firstOrNull()?.let(AiHubViewModel::signalKeyFor)
+        )
+    }
     val listState = rememberLazyListState()
 
     LaunchedEffect(initialPrompt) {
@@ -160,6 +181,80 @@ fun AiHubScreen(
                     onToggleContext = { aiViewModel.setIncludeDeskContext(it) },
                     onClearChat = { aiViewModel.clearChat() }
                 )
+            }
+
+            if (signals.isNotEmpty()) {
+                item {
+                    val verifiableSignals = remember(signals) {
+                        (signals.filter { SignalStatus.fromWire(it.status).isOpen } +
+                            signals.filter { !SignalStatus.fromWire(it.status).isOpen }).take(8)
+                    }
+                    val targetSignal = verifiableSignals.firstOrNull {
+                        AiHubViewModel.signalKeyFor(it) == selectedVerifySignalKey
+                    } ?: verifiableSignals.first()
+                    val targetKey = AiHubViewModel.signalKeyFor(targetSignal)
+                    val targetCandles = candlesBySymbol[targetSignal.instrument].orEmpty()
+                    val targetAnalytics = remember(targetSignal, targetCandles, riskConfig, signals, spotRates, qualityIssues) {
+                        MarketAnalyticsEngine.compute(targetSignal, targetCandles, riskConfig, signals, spotRates, qualityIssues)
+                    }
+                    val targetDecimals = if (targetSignal.instrument.endsWith("JPY")) 3 else if (targetSignal.assetClass == "crypto") 2 else 5
+                    val targetVerification = verificationsByKey[targetKey] ?: AiVerificationState.Idle
+
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = SlateCard),
+                            border = BorderStroke(1.dp, HairlineBorder),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = "SELECT SIGNAL TO VERIFY & AUDIT RISK",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MeridianTeal
+                                )
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    verifiableSignals.forEach { sig ->
+                                        val sKey = AiHubViewModel.signalKeyFor(sig)
+                                        FilterChip(
+                                            selected = sKey == targetKey,
+                                            onClick = { selectedVerifySignalKey = sKey },
+                                            label = {
+                                                Text(
+                                                    text = "${sig.instrument} ${sig.direction.uppercase()} (${sig.timeframe})",
+                                                    style = MaterialTheme.typography.labelSmall
+                                                )
+                                            },
+                                            colors = FilterChipDefaults.filterChipColors(
+                                                selectedContainerColor = MeridianTealTint,
+                                                selectedLabelColor = MeridianTeal
+                                            )
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        MarketAnalyticsCard(
+                            analytics = targetAnalytics,
+                            decimals = targetDecimals
+                        )
+
+                        AiVerificationScorecard(
+                            verificationState = targetVerification,
+                            onVerifyClick = {
+                                aiViewModel.verifySignalAsTrader(targetSignal, targetAnalytics, deskContext)
+                            }
+                        )
+                    }
+                }
             }
 
             if (showWebPortals) {

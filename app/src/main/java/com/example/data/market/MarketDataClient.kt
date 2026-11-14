@@ -5,6 +5,7 @@ import com.example.domain.model.Candle
 import com.example.domain.model.EconomicEvent
 import com.example.domain.model.FundingPoint
 import com.example.domain.model.Instrument
+import com.example.domain.model.InstrumentUniverse
 import com.example.domain.model.OpenInterestPoint
 import com.example.domain.model.Timeframe
 import kotlinx.coroutines.Dispatchers
@@ -19,7 +20,6 @@ import java.io.InputStreamReader
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
-import java.time.ZonedDateTime
 import java.util.concurrent.TimeUnit
 
 data class MarketFeedBundle(
@@ -107,6 +107,253 @@ class MarketDataClient(
         } else {
             fetchFxBundle(instrument, timeframe, nowMs)
         }
+    }
+
+    /**
+     * Fetches live OHLCV market data for ANY user-searched FX, Metals, Crypto, or Index ticker.
+     * Checks [InstrumentUniverse] first, then dynamically resolves arbitrary pairs such as
+     * EURGBP, AUDJPY, XAGUSD, DOGEUSDT, AVAX, SUI, PEPE, GOLD, AAPL, or ^GSPC.
+     */
+    suspend fun fetchAnyPairBundle(
+        rawQuery: String,
+        timeframe: Timeframe = Timeframe.H1,
+        limit: Int = 240
+    ): MarketFeedBundle = withContext(Dispatchers.IO) {
+        val nowMs = System.currentTimeMillis()
+        val instrument = resolveAnyInstrument(rawQuery)
+            ?: return@withContext MarketFeedBundle(
+                instrument = Instrument(
+                    symbol = rawQuery.trim().uppercase(),
+                    displayName = rawQuery.trim().uppercase(),
+                    assetClass = AssetClass.FX,
+                    baseCurrency = "USD",
+                    quoteCurrency = "USD",
+                    tickSize = 0.0001,
+                    pipSize = 0.001,
+                    contractSize = 1.0,
+                    minLot = 0.01,
+                    lotStep = 0.01,
+                    baseSpreadPrice = 0.0,
+                    commissionPerUnitPct = 0.0
+                ),
+                timeframe = timeframe,
+                candles = emptyList(),
+                dailyCandles = emptyList(),
+                fundingHistory = emptyList(),
+                openInterestHistory = emptyList(),
+                providerName = "Unknown Symbol",
+                fetchedAtEpochMs = nowMs,
+                errorMessage = "Enter a valid pair or ticker such as EURUSD, GBPUSD, XAUUSD, EURGBP, BTCUSDT, SOL, or DOGE."
+            )
+
+        InstrumentUniverse.find(instrument.symbol)?.let { known ->
+            return@withContext fetchInstrumentBundle(known, timeframe, limit)
+        }
+
+        if (instrument.assetClass == AssetClass.CRYPTO) {
+            val primary = fetchCryptoBundle(instrument, timeframe, limit, nowMs)
+            if (primary.candles.isNotEmpty()) return@withContext primary
+
+            // Fallback to Binance Spot klines
+            val spotCandles = runCatching {
+                fetchBinanceSpotKlines(instrument.binanceSymbol, timeframe, limit)
+            }.getOrNull().orEmpty()
+            if (spotCandles.isNotEmpty()) {
+                return@withContext MarketFeedBundle(
+                    instrument = instrument,
+                    timeframe = timeframe,
+                    candles = spotCandles,
+                    dailyCandles = if (timeframe == Timeframe.D1) spotCandles else emptyList(),
+                    fundingHistory = emptyList(),
+                    openInterestHistory = emptyList(),
+                    providerName = "Binance Spot Public",
+                    fetchedAtEpochMs = System.currentTimeMillis()
+                )
+            }
+
+            // Last fallback: Yahoo Finance CRYPTO-USD ticker
+            val yahooCrypto = runCatching {
+                fetchYahooFxCandles("${instrument.baseCurrency}-USD", timeframe)
+            }.getOrNull().orEmpty()
+            if (yahooCrypto.isNotEmpty()) {
+                return@withContext MarketFeedBundle(
+                    instrument = instrument,
+                    timeframe = timeframe,
+                    candles = yahooCrypto,
+                    dailyCandles = emptyList(),
+                    fundingHistory = emptyList(),
+                    openInterestHistory = emptyList(),
+                    providerName = "Yahoo Finance Chart v8",
+                    fetchedAtEpochMs = System.currentTimeMillis()
+                )
+            }
+
+            return@withContext primary
+        }
+
+        val fxBundle = fetchFxBundle(instrument, timeframe, nowMs)
+        if (fxBundle.candles.isNotEmpty()) return@withContext fxBundle
+
+        // If the user typed a 3-5 char crypto ticker that wasn't auto-recognized, try <SYMBOL>USDT cleanly
+        val alphaOnly = rawQuery.trim().uppercase().replace("/", "").replace("-", "").replace(" ", "")
+        if (alphaOnly.length in 2..6 && alphaOnly !in FX_CURRENCIES) {
+            val asCrypto = buildCustomCryptoInstrument(alphaOnly)
+            val cryptoTry = fetchCryptoBundle(asCrypto, timeframe, limit, nowMs)
+            if (cryptoTry.candles.isNotEmpty()) return@withContext cryptoTry
+        }
+        fxBundle
+    }
+
+    fun resolveAnyInstrument(rawQuery: String): Instrument? {
+        val trimmed = rawQuery.trim().uppercase()
+        if (trimmed.isEmpty()) return null
+        val compact = trimmed.replace("/", "").replace("-", "").replace("_", "").replace(" ", "")
+
+        InstrumentUniverse.find(compact)?.let { return it }
+
+        when (compact) {
+            "GOLD", "XAU", "XAUUSD" -> return InstrumentUniverse.find("XAUUSD")
+            "SILVER", "XAG", "XAGUSD" -> return Instrument(
+                symbol = "XAGUSD",
+                displayName = "XAG/USD (Silver)",
+                assetClass = AssetClass.FX,
+                baseCurrency = "XAG",
+                quoteCurrency = "USD",
+                tickSize = 0.001,
+                pipSize = 0.01,
+                contractSize = 5_000.0,
+                minLot = 0.01,
+                lotStep = 0.01,
+                baseSpreadPrice = 0.025,
+                commissionPerUnitPct = 0.00004,
+                yahooTicker = "SI=F"
+            )
+            "OIL", "WTI", "USOIL", "CLF" -> return Instrument(
+                symbol = "USOIL",
+                displayName = "WTI Crude Oil",
+                assetClass = AssetClass.FX,
+                baseCurrency = "WTI",
+                quoteCurrency = "USD",
+                tickSize = 0.01,
+                pipSize = 0.01,
+                contractSize = 1_000.0,
+                minLot = 0.01,
+                lotStep = 0.01,
+                baseSpreadPrice = 0.03,
+                commissionPerUnitPct = 0.00004,
+                yahooTicker = "CL=F"
+            )
+            "NAS100", "USTEC", "NDX", "QQQ" -> return Instrument(
+                symbol = "NAS100",
+                displayName = "Nasdaq 100",
+                assetClass = AssetClass.FX,
+                baseCurrency = "NDX",
+                quoteCurrency = "USD",
+                tickSize = 0.1,
+                pipSize = 1.0,
+                contractSize = 1.0,
+                minLot = 0.1,
+                lotStep = 0.1,
+                baseSpreadPrice = 1.5,
+                commissionPerUnitPct = 0.00005,
+                yahooTicker = "NQ=F"
+            )
+            "SPX500", "SP500", "US500" -> return Instrument(
+                symbol = "SPX500",
+                displayName = "S&P 500 Futures",
+                assetClass = AssetClass.FX,
+                baseCurrency = "SPX",
+                quoteCurrency = "USD",
+                tickSize = 0.1,
+                pipSize = 1.0,
+                contractSize = 1.0,
+                minLot = 0.1,
+                lotStep = 0.1,
+                baseSpreadPrice = 0.5,
+                commissionPerUnitPct = 0.00005,
+                yahooTicker = "ES=F"
+            )
+        }
+
+        // Standard 6-letter FX pair e.g. EURGBP, AUDJPY, CHFJPY
+        if (compact.length == 6 && compact.all { it.isLetter() }) {
+            val base = compact.substring(0, 3)
+            val quote = compact.substring(3, 6)
+            if (base in FX_CURRENCIES && quote in FX_CURRENCIES) {
+                val isJpy = quote == "JPY"
+                return Instrument(
+                    symbol = compact,
+                    displayName = "$base/$quote",
+                    assetClass = AssetClass.FX,
+                    baseCurrency = base,
+                    quoteCurrency = quote,
+                    tickSize = if (isJpy) 0.001 else 0.00001,
+                    pipSize = if (isJpy) 0.01 else 0.0001,
+                    contractSize = 100_000.0,
+                    minLot = 0.01,
+                    lotStep = 0.01,
+                    baseSpreadPrice = if (isJpy) 0.020 else 0.00020,
+                    commissionPerUnitPct = 0.000035,
+                    yahooTicker = "${compact}=X"
+                )
+            }
+        }
+
+        // Explicit crypto suffix or short ticker
+        if (compact.endsWith("USDT") || compact.endsWith("USDC") || compact.endsWith("BUSD") ||
+            (compact.length > 3 && compact.endsWith("USD") && compact.substring(0, compact.length - 3) !in FX_CURRENCIES)
+        ) {
+            val base = when {
+                compact.endsWith("USDT") -> compact.removeSuffix("USDT")
+                compact.endsWith("USDC") -> compact.removeSuffix("USDC")
+                compact.endsWith("BUSD") -> compact.removeSuffix("BUSD")
+                else -> compact.removeSuffix("USD")
+            }
+            if (base.isNotEmpty()) return buildCustomCryptoInstrument(base)
+        }
+
+        if (compact.length in 2..6 && compact.all { it.isLetterOrDigit() }) {
+            return buildCustomCryptoInstrument(compact)
+        }
+
+        // Direct Yahoo equity/index symbol fallback (preserve hyphens like ^GSPC or BRK-B)
+        return Instrument(
+            symbol = trimmed,
+            displayName = trimmed,
+            assetClass = AssetClass.FX,
+            baseCurrency = trimmed.take(4),
+            quoteCurrency = "USD",
+            tickSize = 0.01,
+            pipSize = 0.01,
+            contractSize = 1.0,
+            minLot = 0.01,
+            lotStep = 0.01,
+            baseSpreadPrice = 0.02,
+            commissionPerUnitPct = 0.0001,
+            yahooTicker = trimmed
+        )
+    }
+
+    private fun buildCustomCryptoInstrument(baseTicker: String): Instrument {
+        val base = baseTicker.uppercase()
+        val sym = "${base}USDT"
+        return InstrumentUniverse.find(sym) ?: Instrument(
+            symbol = sym,
+            displayName = "$base/USDT",
+            assetClass = AssetClass.CRYPTO,
+            baseCurrency = base,
+            quoteCurrency = "USDT",
+            tickSize = 0.0001,
+            pipSize = 0.001,
+            contractSize = 1.0,
+            minLot = 0.01,
+            lotStep = 0.01,
+            baseSpreadPrice = 0.0005,
+            commissionPerUnitPct = 0.0005,
+            cryptoCluster = "ALT_SPOT_PERP",
+            binanceSymbol = sym,
+            bybitSymbol = sym
+        )
     }
 
     private fun fetchCryptoBundle(
@@ -337,6 +584,38 @@ class MarketDataClient(
         }
     }
 
+    private fun fetchBinanceSpotKlines(symbol: String, tf: Timeframe, limit: Int): List<Candle> {
+        val interval = when (tf) {
+            Timeframe.M15 -> "15m"
+            Timeframe.H1 -> "1h"
+            Timeframe.H4 -> "4h"
+            Timeframe.D1 -> "1d"
+        }
+        val url = "https://api.binance.com/api/v3/klines?symbol=$symbol&interval=$interval&limit=${limit.coerceIn(50, 1000)}"
+        val req = Request.Builder().url(url).build()
+        httpClient.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) error("Binance Spot HTTP ${resp.code}")
+            val arr = JSONArray(resp.body?.string() ?: error("Empty Binance Spot body"))
+            val out = ArrayList<Candle>(arr.length())
+            for (i in 0 until arr.length()) {
+                val row = arr.getJSONArray(i)
+                out.add(
+                    Candle(
+                        openTimeEpochMs = row.getLong(0),
+                        closeTimeEpochMs = row.getLong(6) + 1L,
+                        open = row.getString(1).toDouble(),
+                        high = row.getString(2).toDouble(),
+                        low = row.getString(3).toDouble(),
+                        close = row.getString(4).toDouble(),
+                        volume = row.getString(5).toDouble(),
+                        isClosed = true
+                    )
+                )
+            }
+            return out
+        }
+    }
+
     private fun fetchBinanceFunding(symbol: String): List<FundingPoint> {
         val url = "https://fapi.binance.com/fapi/v1/fundingRate?symbol=$symbol&limit=250"
         val req = Request.Builder().url(url).build()
@@ -540,5 +819,12 @@ class MarketDataClient(
             )
         }
         return events.sortedBy { it.releaseEpochMs }
+    }
+
+    companion object {
+        private val FX_CURRENCIES = setOf(
+            "USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD",
+            "SGD", "HKD", "NOK", "SEK", "MXN", "ZAR", "TRY", "CNH", "INR", "PKR"
+        )
     }
 }
