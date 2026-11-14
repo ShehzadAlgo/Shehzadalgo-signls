@@ -13,6 +13,7 @@ import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.firestore.Query
+import com.google.firebase.firestore.SetOptions
 import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
@@ -146,39 +147,51 @@ class MeridianLedgerRepository(
             .collection("signals").document(docId)
 
         try {
-            val latestEvent = getLatestEvent(uid)
-            val nextSeq = (latestEvent?.sequenceIndex ?: -1L) + 1L
-            val prevHash = latestEvent?.eventHash ?: HashChainUtils.GENESIS_HASH
-            val timestampIso = signal.createdAtIso.ifBlank { Instant.now().toString() }
-            val summary = "${signal.instrument} ${signal.direction.uppercase()} ${signal.strategy} ${signal.riskStatus} risk=${signal.suggestedRiskPct}%"
-            val eventHash = HashChainUtils.computeEventHash(
-                prevHash = prevHash,
-                sequenceIndex = nextSeq,
-                signalId = docId,
-                eventType = "SIGNAL_CREATED",
-                timestampIso = timestampIso,
-                payloadSummary = summary
-            )
+            val eventId = db.runTransaction { transaction ->
+                val stateRef = db.collection("users").document(uid)
+                    .collection("ledger_state").document("signal_events")
+                val stateSnap = transaction.get(stateRef)
+                val lastSequence = stateSnap.getLong("lastSequenceIndex") ?: -1L
+                val prevHash = stateSnap.getString("lastEventHash") ?: HashChainUtils.GENESIS_HASH
+                val nextSeq = lastSequence + 1L
+                val timestampIso = signal.createdAtIso.ifBlank { Instant.now().toString() }
+                val summary = "${signal.instrument} ${signal.direction.uppercase()} ${signal.strategy} ${signal.riskStatus} risk=${signal.suggestedRiskPct}%"
+                val eventHash = HashChainUtils.computeEventHash(
+                    prevHash = prevHash,
+                    sequenceIndex = nextSeq,
+                    signalId = docId,
+                    eventType = "SIGNAL_CREATED",
+                    timestampIso = timestampIso,
+                    payloadSummary = summary
+                )
+                val evRef = db.collection("users").document(uid)
+                    .collection("signal_events").document("ev_${nextSeq}_${UUID.randomUUID().toString().replace("-", "").take(8)}")
+                val eventRecord = SignalEventRecord(
+                    userId = uid,
+                    signalId = docId,
+                    sequenceIndex = nextSeq,
+                    eventType = "SIGNAL_CREATED",
+                    timestampIso = timestampIso,
+                    payloadSummary = summary,
+                    prevHash = prevHash,
+                    eventHash = eventHash
+                )
 
-            val eventId = "ev_${nextSeq}_${UUID.randomUUID().toString().replace("-", "").take(8)}"
-            val evRef = db.collection("users").document(uid)
-                .collection("signal_events").document(eventId)
-            val eventRecord = SignalEventRecord(
-                userId = uid,
-                signalId = docId,
-                sequenceIndex = nextSeq,
-                eventType = "SIGNAL_CREATED",
-                timestampIso = timestampIso,
-                payloadSummary = summary,
-                prevHash = prevHash,
-                eventHash = eventHash
-            )
-
-            val batch = db.batch()
-            batch.set(sigRef, signal.toCreateMap(uid))
-            batch.set(evRef, eventRecord.toCreateMap(uid))
-            batch.commit().await()
-            docId
+                transaction.set(
+                    stateRef,
+                    mapOf(
+                        "userId" to uid,
+                        "lastSequenceIndex" to nextSeq,
+                        "lastEventHash" to eventHash,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    ),
+                    SetOptions.merge()
+                )
+                transaction.set(sigRef, signal.toCreateMap(uid))
+                transaction.set(evRef, eventRecord.toCreateMap(uid))
+                evRef.id
+            }.await()
+            eventId
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -201,45 +214,59 @@ class MeridianLedgerRepository(
             .collection("signals").document(signalId)
 
         try {
-            val latestEvent = getLatestEvent(uid)
-            val nextSeq = (latestEvent?.sequenceIndex ?: -1L) + 1L
-            val prevHash = latestEvent?.eventHash ?: HashChainUtils.GENESIS_HASH
-            val timestampIso = Instant.now().toString()
-            val summary = "Status->${newStatus.wire} realizedR=${"%.2f".format(realizedR)} mae=${"%.2f".format(maeR)} mfe=${"%.2f".format(mfeR)}"
-            val eventHash = HashChainUtils.computeEventHash(
-                prevHash = prevHash,
-                sequenceIndex = nextSeq,
-                signalId = signalId,
-                eventType = newStatus.wire,
-                timestampIso = timestampIso,
-                payloadSummary = summary
-            )
-            val eventId = "ev_${nextSeq}_${UUID.randomUUID().toString().replace("-", "").take(8)}"
-            val evRef = db.collection("users").document(uid)
-                .collection("signal_events").document(eventId)
-            val eventRecord = SignalEventRecord(
-                userId = uid,
-                signalId = signalId,
-                sequenceIndex = nextSeq,
-                eventType = newStatus.wire,
-                timestampIso = timestampIso,
-                payloadSummary = summary,
-                prevHash = prevHash,
-                eventHash = eventHash
-            )
+            db.runTransaction { transaction ->
+                val stateRef = db.collection("users").document(uid)
+                    .collection("ledger_state").document("signal_events")
+                val stateSnap = transaction.get(stateRef)
+                val lastSequence = stateSnap.getLong("lastSequenceIndex") ?: -1L
+                val prevHash = stateSnap.getString("lastEventHash") ?: HashChainUtils.GENESIS_HASH
+                val nextSeq = lastSequence + 1L
+                val timestampIso = Instant.now().toString()
+                val summary = "Status->${newStatus.wire} realizedR=${"%.2f".format(realizedR)} mae=${"%.2f".format(maeR)} mfe=${"%.2f".format(mfeR)}"
+                val eventHash = HashChainUtils.computeEventHash(
+                    prevHash = prevHash,
+                    sequenceIndex = nextSeq,
+                    signalId = signalId,
+                    eventType = newStatus.wire,
+                    timestampIso = timestampIso,
+                    payloadSummary = summary
+                )
+                val eventId = "ev_${nextSeq}_${UUID.randomUUID().toString().replace("-", "").take(8)}"
+                val evRef = db.collection("users").document(uid)
+                    .collection("signal_events").document(eventId)
+                val eventRecord = SignalEventRecord(
+                    userId = uid,
+                    signalId = signalId,
+                    sequenceIndex = nextSeq,
+                    eventType = newStatus.wire,
+                    timestampIso = timestampIso,
+                    payloadSummary = summary,
+                    prevHash = prevHash,
+                    eventHash = eventHash
+                )
 
-            val updates = mapOf(
-                "status" to newStatus.wire,
-                "realizedR" to realizedR,
-                "maeR" to maeR,
-                "mfeR" to mfeR,
-                "durationMinutes" to durationMinutes,
-                "updatedAt" to FieldValue.serverTimestamp()
-            )
-            val batch = db.batch()
-            batch.update(sigRef, updates)
-            batch.set(evRef, eventRecord.toCreateMap(uid))
-            batch.commit().await()
+                val updates = mapOf(
+                    "status" to newStatus.wire,
+                    "realizedR" to realizedR,
+                    "maeR" to maeR,
+                    "mfeR" to mfeR,
+                    "durationMinutes" to durationMinutes,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+                transaction.set(
+                    stateRef,
+                    mapOf(
+                        "userId" to uid,
+                        "lastSequenceIndex" to nextSeq,
+                        "lastEventHash" to eventHash,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    ),
+                    SetOptions.merge()
+                )
+                transaction.update(sigRef, updates)
+                transaction.set(evRef, eventRecord.toCreateMap(uid))
+                Unit
+            }.await()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -254,38 +281,53 @@ class MeridianLedgerRepository(
         payloadSummary: String
     ): Result<String> = runCatching {
         val uid = requireUserId()
-        val latestEvent = getLatestEvent(uid)
-        val nextSeq = (latestEvent?.sequenceIndex ?: -1L) + 1L
-        val prevHash = latestEvent?.eventHash ?: HashChainUtils.GENESIS_HASH
-        val timestampIso = Instant.now().toString()
-        val eventHash = HashChainUtils.computeEventHash(
-            prevHash = prevHash,
-            sequenceIndex = nextSeq,
-            signalId = signalId,
-            eventType = eventType,
-            timestampIso = timestampIso,
-            payloadSummary = payloadSummary
-        )
-        val eventId = "ev_${nextSeq}_${UUID.randomUUID().toString().replace("-", "").take(8)}"
-        val evRef = db.collection("users").document(uid)
-            .collection("signal_events").document(eventId)
-        val record = SignalEventRecord(
-            userId = uid,
-            signalId = signalId,
-            sequenceIndex = nextSeq,
-            eventType = eventType,
-            timestampIso = timestampIso,
-            payloadSummary = payloadSummary,
-            prevHash = prevHash,
-            eventHash = eventHash
-        )
         try {
-            evRef.set(record.toCreateMap(uid)).await()
-            eventId
+            db.runTransaction { transaction ->
+                val stateRef = db.collection("users").document(uid)
+                    .collection("ledger_state").document("signal_events")
+                val stateSnap = transaction.get(stateRef)
+                val lastSequence = stateSnap.getLong("lastSequenceIndex") ?: -1L
+                val prevHash = stateSnap.getString("lastEventHash") ?: HashChainUtils.GENESIS_HASH
+                val nextSeq = lastSequence + 1L
+                val timestampIso = Instant.now().toString()
+                val eventHash = HashChainUtils.computeEventHash(
+                    prevHash = prevHash,
+                    sequenceIndex = nextSeq,
+                    signalId = signalId,
+                    eventType = eventType,
+                    timestampIso = timestampIso,
+                    payloadSummary = payloadSummary
+                )
+                val eventId = "ev_${nextSeq}_${UUID.randomUUID().toString().replace("-", "").take(8)}"
+                val evRef = db.collection("users").document(uid)
+                    .collection("signal_events").document(eventId)
+                val record = SignalEventRecord(
+                    userId = uid,
+                    signalId = signalId,
+                    sequenceIndex = nextSeq,
+                    eventType = eventType,
+                    timestampIso = timestampIso,
+                    payloadSummary = payloadSummary,
+                    prevHash = prevHash,
+                    eventHash = eventHash
+                )
+                transaction.set(
+                    stateRef,
+                    mapOf(
+                        "userId" to uid,
+                        "lastSequenceIndex" to nextSeq,
+                        "lastEventHash" to eventHash,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    ),
+                    SetOptions.merge()
+                )
+                transaction.set(evRef, record.toCreateMap(uid))
+                eventId
+            }.await()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.CREATE, evRef.path)
+            handleFirestoreError(e, OperationType.CREATE, "users/$uid/signal_events")
             throw e
         }
     }

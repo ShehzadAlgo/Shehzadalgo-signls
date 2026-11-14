@@ -199,6 +199,15 @@ service cloud.firestore {
              isValidTimestamp(data.updatedAt);
     }
 
+    function isValidLedgerState(data, userId) {
+      return data.keys().hasAll(['userId', 'lastSequenceIndex', 'lastEventHash', 'updatedAt']) &&
+             data.keys().hasOnly(['userId', 'lastSequenceIndex', 'lastEventHash', 'updatedAt']) &&
+             data.userId is string && data.userId == userId &&
+             data.lastSequenceIndex is int && data.lastSequenceIndex >= -1 &&
+             data.lastEventHash is string && data.lastEventHash.size() == 64 &&
+             isValidTimestamp(data.updatedAt);
+    }
+
     match /users/{userId} {
       allow get: if isOwner(userId);
       allow list, create, update, delete: if false;
@@ -211,6 +220,16 @@ service cloud.firestore {
                          isValidRiskConfig(incoming(), userId) &&
                          incoming().userId == existing().userId &&
                          incoming().createdAt == existing().createdAt;
+        allow delete: if false;
+      }
+
+      match /ledger_state/{stateId} {
+        allow get: if isOwner(userId) && isValidId(stateId);
+        allow list: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(stateId) && isValidLedgerState(incoming(), userId);
+        allow update: if isOwner(userId) && isValidId(stateId) &&
+                         isValidLedgerState(incoming(), userId) &&
+                         incoming().userId == existing().userId;
         allow delete: if false;
       }
 
