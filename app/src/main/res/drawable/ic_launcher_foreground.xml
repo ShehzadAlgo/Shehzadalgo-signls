@@ -3,6 +3,6 @@
     <item
         android:width="66dp"
         android:height="66dp"
-        android:drawable="@drawable/ic_meridian_logo_1794670022420"
+        android:drawable="@drawable/ic_shehzad_algo_logo"
         android:gravity="center" />
 </layer-list>

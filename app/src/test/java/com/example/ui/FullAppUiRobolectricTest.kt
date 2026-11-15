@@ -265,7 +265,8 @@ class FullAppUiRobolectricTest {
     @Test
     fun aiHubScreen_displaysSignalVerifierAndProviderControls() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
-        val vm = AiHubViewModel(settingsStore = AiSettingsStore(context))
+        val testPrefs = context.getSharedPreferences("test_ai_prefs", android.content.Context.MODE_PRIVATE)
+        val vm = AiHubViewModel(settingsStore = AiSettingsStore(context, testPrefs))
         val signal = sampleSignal()
         val candles = sampleCandles()
 
@@ -540,5 +541,83 @@ class FullAppUiRobolectricTest {
         composeRule.onNodeWithTag("live_24h_toggle").performClick()
         assertEquals(true, toggledState)
         composeRule.onNodeWithTag("pair_search_input").assertExists()
+    }
+
+    @Test
+    fun signalsScreen_tabletMode_rendersDualPaneAndInspectorSimultaneously() {
+        val signal = sampleSignal()
+        val candles = sampleCandles()
+        composeRule.setContent {
+            MeridianTheme {
+                SignalsScreen(
+                    signalsState = UiState.Success(listOf(signal)),
+                    scanStatus = ScanStatus(providerSummary = "Feeds: Yahoo Finance"),
+                    riskConfig = RiskConfig(),
+                    qualityIssues = emptyList(),
+                    candlesBySymbol = mapOf("EURUSD" to candles),
+                    spotRates = mapOf("EURUSD" to 1.1460),
+                    isTabletMode = true,
+                    onScanClosedBars = {},
+                    onUpdateStatus = { _, _, _ -> },
+                    onImportCsv = { _, _, _ -> },
+                    onVerifySignalWithAi = { _, _ -> },
+                    onAnalyzeWithAi = {},
+                    onShowMessage = {}
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("tablet_dual_pane_signals").assertExists()
+        composeRule.onNodeWithTag("tablet_signal_detail_pane").assertExists()
+        composeRule.onNodeWithTag("market_analytics_card").assertExists()
+        composeRule.onNodeWithTag("ai_verification_scorecard").assertExists()
+    }
+
+    @Test
+    @Config(sdk = [36], qualifiers = "w1024dp-h768dp")
+    fun wideTabletScreens_renderDualPaneRiskAndLabAndSwitchStrategy() {
+        var validatedId: String? = null
+        composeRule.setContent {
+            MeridianTheme {
+                LabScreen(
+                    storedReports = emptyList(),
+                    liveDetails = emptyMap(),
+                    validatingStrategyId = null,
+                    isTabletMode = true,
+                    onValidateStrategy = { validatedId = it },
+                    onImportCsv = { _, _, _ -> }
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("tablet_dual_pane_lab").assertIsDisplayed()
+        composeRule.onNodeWithTag("tablet_lab_detail_pane").assertIsDisplayed()
+        composeRule.onNodeWithTag("lab_strategy_row_S2_SESSION_BREAKOUT").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("validate_S2_SESSION_BREAKOUT").assertExists().performClick()
+        assertEquals("S2_SESSION_BREAKOUT", validatedId)
+    }
+
+    @Test
+    fun riskDashboard_tabletMode_rendersDualPaneWorkspace() {
+        composeRule.setContent {
+            MeridianTheme {
+                RiskDashboardContent(
+                    riskConfig = RiskConfig(),
+                    signals = listOf(sampleSignal()),
+                    spotRates = mapOf("EURUSD" to 1.1460),
+                    qualityIssues = emptyList(),
+                    candlesBySymbol = mapOf("EURUSD" to sampleCandles(100)),
+                    isTabletMode = true,
+                    onSaveRiskConfig = { _, _ -> }
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("tablet_dual_pane_risk").assertExists()
+        composeRule.onNodeWithTag("risk_pulse_strip").assertIsDisplayed()
     }
 }

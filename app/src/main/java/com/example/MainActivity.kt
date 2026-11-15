@@ -11,22 +11,27 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.clickable
-import androidx.core.content.ContextCompat
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Logout
@@ -40,7 +45,12 @@ import androidx.compose.material.icons.outlined.Book
 import androidx.compose.material.icons.outlined.CandlestickChart
 import androidx.compose.material.icons.outlined.Science
 import androidx.compose.material.icons.outlined.Shield
+import androidx.compose.material.icons.outlined.Smartphone
+import androidx.compose.material.icons.outlined.TabletMac
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -56,6 +66,8 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.VerticalDivider
+import androidx.core.content.ContextCompat
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -102,12 +114,17 @@ import com.example.ui.theme.BearCrimsonTint
 import com.example.ui.theme.BullEmerald
 import com.example.ui.theme.BullEmeraldTint
 import com.example.ui.theme.GraphiteSurface
+import com.example.ui.theme.HairlineBorder
 import com.example.ui.theme.InkPrimary
 import com.example.ui.theme.InkSecondary
 import com.example.ui.theme.MeridianTeal
 import com.example.ui.theme.MeridianTealTint
 import com.example.ui.theme.MeridianTheme
+import com.example.ui.theme.MonoMetricSmall
 import com.example.ui.theme.ObsidianBg
+import com.example.ui.theme.SlateCard
+import com.example.ui.theme.WarnAmber
+import com.example.ui.theme.WarnAmberTint
 import com.example.ui.viewmodel.AiHubViewModel
 import com.example.ui.viewmodel.MeridianViewModel
 import com.example.ui.viewmodel.UiState
@@ -201,6 +218,7 @@ fun MeridianTerminalShell(
     )
 
     var activeTab by rememberSaveable { mutableStateOf(MeridianTab.SIGNALS) }
+    var tabletViewEnabled by rememberSaveable { mutableStateOf(true) }
     var pendingAiPrompt by remember { mutableStateOf<String?>(null) }
     BackHandler(enabled = activeTab != MeridianTab.SIGNALS) {
         activeTab = MeridianTab.SIGNALS
@@ -282,7 +300,8 @@ fun MeridianTerminalShell(
     }
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize().background(ObsidianBg)) {
-        val useRail = maxWidth >= 600.dp
+        val useTabletShell = tabletViewEnabled
+        val isCompactWidth = maxWidth < 600.dp
 
         Scaffold(
             containerColor = ObsidianBg,
@@ -324,6 +343,32 @@ fun MeridianTerminalShell(
                         }
                     },
                     actions = {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier
+                                .heightIn(min = 48.dp)
+                                .background(
+                                    if (useTabletShell) MeridianTealTint else SlateCard,
+                                    RoundedCornerShape(6.dp)
+                                )
+                                .clickable { tabletViewEnabled = !tabletViewEnabled }
+                                .padding(horizontal = 8.dp, vertical = 6.dp)
+                                .testTag("topbar_view_mode_button")
+                        ) {
+                            Icon(
+                                imageVector = if (useTabletShell) Icons.Outlined.TabletMac else Icons.Outlined.Smartphone,
+                                contentDescription = if (useTabletShell) "Switch to Mobile View" else "Switch to Tablet View",
+                                tint = if (useTabletShell) MeridianTeal else InkSecondary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Text(
+                                text = if (useTabletShell) "TABLET" else "MOBILE",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (useTabletShell) MeridianTeal else InkSecondary
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(4.dp))
                         Text(
                             text = userEmail.substringBefore('@'),
                             style = MaterialTheme.typography.labelSmall,
@@ -345,7 +390,7 @@ fun MeridianTerminalShell(
                 )
             },
             bottomBar = {
-                if (!useRail) {
+                if (!useTabletShell) {
                     NavigationBar(
                         containerColor = GraphiteSurface,
                         windowInsets = WindowInsets.navigationBars
@@ -386,10 +431,13 @@ fun MeridianTerminalShell(
                     .fillMaxSize()
                     .padding(innerPadding)
             ) {
-                if (useRail) {
+                if (useTabletShell) {
                     NavigationRail(
                         containerColor = GraphiteSurface,
-                        modifier = Modifier.fillMaxHeight()
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .width(if (isCompactWidth) 64.dp else 76.dp)
+                            .testTag("tablet_navigation_rail")
                     ) {
                         MeridianTab.entries.forEach { tab ->
                             val selected = activeTab == tab
@@ -414,12 +462,20 @@ fun MeridianTerminalShell(
                             )
                         }
                     }
+                    VerticalDivider(color = HairlineBorder)
                 }
 
-                Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
                     val allSignals = (signalsState as? UiState.Success)?.data.orEmpty()
                     val paperStats = remember(allSignals) {
                         viewModel.computeLedgerStats(allSignals, ExecutionMode.PAPER)
+                    }
+                    val openSignalsCount = remember(allSignals) {
+                        allSignals.count { SignalStatus.fromWire(it.status).isOpen }
+                    }
+                    val openRiskPct = remember(allSignals) {
+                        allSignals.filter { SignalStatus.fromWire(it.status).isOpen }
+                            .sumOf { it.suggestedRiskPct }
                     }
                     val deskContext = remember(allSignals, riskConfig, paperStats, reports, qualityIssues) {
                         AiHubViewModel.buildDeskContextSnapshot(
@@ -431,120 +487,222 @@ fun MeridianTerminalShell(
                         )
                     }
 
-                    when (activeTab) {
-                        MeridianTab.SIGNALS -> SignalsScreen(
-                            signalsState = signalsState,
-                            scanStatus = scanStatus,
-                            riskConfig = riskConfig,
-                            qualityIssues = qualityIssues,
-                            candlesBySymbol = candlesBySymbol,
-                            spotRates = spotRates,
-                            verificationsBySignalKey = verificationsByKey,
-                            pairAnalysisState = pairAnalysisState,
-                            live24hEnabled = live24hEnabled,
-                            onToggleLive24h = toggleLiveMonitor,
-                            onScanClosedBars = { viewModel.scanClosedBarsUniverse() },
-                            onUpdateStatus = { sig, st, r -> viewModel.updateSignalStatus(sig, st, r) },
-                            onImportCsv = handleCsvUri,
-                            onVerifySignalWithAi = { sig, analytics ->
-                                aiViewModel.verifySignalAsTrader(sig, analytics, deskContext)
-                            },
-                            onAnalyzeWithAi = { sig ->
-                                pendingAiPrompt = "Analyze this signal setup in detail (entry/stop/TP, R-multiple, estimated cost, regime fit, and invalidation):\n\n" +
-                                    TelegramFormatter.formatSignal(sig)
-                                activeTab = MeridianTab.AI_HUB
-                            },
-                            onAnalyzePairWithAi = { rawSym, tf ->
-                                aiViewModel.analyzeSearchedPairWithAi(
-                                    rawQuery = rawSym,
-                                    timeframe = tf,
-                                    riskConfig = riskConfig,
-                                    spotRates = spotRates,
-                                    deskContext = deskContext
-                                )
-                            },
-                            onClearPairAnalysis = { aiViewModel.clearPairAnalysis() },
-                            onOpenPairInAiChat = { res ->
-                                pendingAiPrompt = "Deep-dive pro trader analysis for ${res.symbol} (${res.timeframe.wire}):\n" +
-                                    "Bias=${res.bias.displayLabel} (${res.confidenceScore}%), Spot=${res.currentPrice}, Entry=${res.suggestedEntryLow}-${res.suggestedEntryHigh}, " +
-                                    "Vol-SL=${res.volatilityAdjustedStopLoss}, TP1=${res.takeProfit1}, TP2=${res.takeProfit2}, ATR14=${res.atr14}, RSI=${res.rsi14}, ADX=${res.adx14}.\n" +
-                                    "Review key invalidation triggers and multi-timeframe execution."
-                                activeTab = MeridianTab.AI_HUB
-                            },
-                            onShowMessage = { msg ->
-                                scope.launch { snackbarHostState.showSnackbar(msg) }
-                            }
+                    if (useTabletShell) {
+                        TabletOverviewStrip(
+                            netPaperR = paperStats.netR,
+                            openSignalsCount = openSignalsCount,
+                            openRiskPct = openRiskPct,
+                            maxOpenRiskPct = riskConfig.maxOpenRiskPct,
+                            sentimentState = sentimentState,
+                            isHalted = riskConfig.manualKillSwitch,
+                            onSelectTab = { activeTab = it }
                         )
+                        HorizontalDivider(color = HairlineBorder)
+                    }
 
-                        MeridianTab.RISK -> {
-                            val openRiskPct = remember(allSignals) {
-                                allSignals.filter { SignalStatus.fromWire(it.status).isOpen }
-                                    .sumOf { it.suggestedRiskPct }
-                            }
-                            LaunchedEffect(activeTab) {
-                                if (sentimentState is MarketSentimentState.Idle) {
-                                    aiViewModel.refreshMarketSentiment(
-                                        riskConfig = riskConfig,
-                                        openRiskPct = openRiskPct
-                                    )
-                                }
-                            }
-                            RiskScreen(
+                    Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                        when (activeTab) {
+                            MeridianTab.SIGNALS -> SignalsScreen(
+                                signalsState = signalsState,
+                                scanStatus = scanStatus,
                                 riskConfig = riskConfig,
+                                qualityIssues = qualityIssues,
+                                candlesBySymbol = candlesBySymbol,
+                                spotRates = spotRates,
+                                verificationsBySignalKey = verificationsByKey,
+                                pairAnalysisState = pairAnalysisState,
+                                live24hEnabled = live24hEnabled,
+                                isTabletMode = useTabletShell,
+                                onToggleLive24h = toggleLiveMonitor,
+                                onScanClosedBars = { viewModel.scanClosedBarsUniverse() },
+                                onUpdateStatus = { sig, st, r -> viewModel.updateSignalStatus(sig, st, r) },
+                                onImportCsv = handleCsvUri,
+                                onVerifySignalWithAi = { sig, analytics ->
+                                    aiViewModel.verifySignalAsTrader(sig, analytics, deskContext)
+                                },
+                                onAnalyzeWithAi = { sig ->
+                                    pendingAiPrompt = "Analyze this signal setup in detail (entry/stop/TP, R-multiple, estimated cost, regime fit, and invalidation):\n\n" +
+                                        TelegramFormatter.formatSignal(sig)
+                                    activeTab = MeridianTab.AI_HUB
+                                },
+                                onAnalyzePairWithAi = { rawSym, tf ->
+                                    aiViewModel.analyzeSearchedPairWithAi(
+                                        rawQuery = rawSym,
+                                        timeframe = tf,
+                                        riskConfig = riskConfig,
+                                        spotRates = spotRates,
+                                        deskContext = deskContext
+                                    )
+                                },
+                                onClearPairAnalysis = { aiViewModel.clearPairAnalysis() },
+                                onOpenPairInAiChat = { res ->
+                                    pendingAiPrompt = "Deep-dive pro trader analysis for ${res.symbol} (${res.timeframe.wire}):\n" +
+                                        "Bias=${res.bias.displayLabel} (${res.confidenceScore}%), Spot=${res.currentPrice}, Entry=${res.suggestedEntryLow}-${res.suggestedEntryHigh}, " +
+                                        "Vol-SL=${res.volatilityAdjustedStopLoss}, TP1=${res.takeProfit1}, TP2=${res.takeProfit2}, ATR14=${res.atr14}, RSI=${res.rsi14}, ADX=${res.adx14}.\n" +
+                                        "Review key invalidation triggers and multi-timeframe execution."
+                                    activeTab = MeridianTab.AI_HUB
+                                },
+                                onShowMessage = { msg ->
+                                    scope.launch { snackbarHostState.showSnackbar(msg) }
+                                }
+                            )
+
+                            MeridianTab.RISK -> {
+                                LaunchedEffect(activeTab) {
+                                    if (sentimentState is MarketSentimentState.Idle) {
+                                        aiViewModel.refreshMarketSentiment(
+                                            riskConfig = riskConfig,
+                                            openRiskPct = openRiskPct
+                                        )
+                                    }
+                                }
+                                RiskScreen(
+                                    riskConfig = riskConfig,
+                                    signals = allSignals,
+                                    spotRates = spotRates,
+                                    qualityIssues = qualityIssues,
+                                    viewModel = viewModel,
+                                    candlesBySymbol = candlesBySymbol,
+                                    sentimentState = sentimentState,
+                                    activeRiskAlerts = activeRiskAlerts,
+                                    live24hEnabled = live24hEnabled,
+                                    isTabletMode = useTabletShell,
+                                    onToggleLive24h = toggleLiveMonitor,
+                                    onDismissRiskAlert = { viewModel.dismissRiskAlert(it) },
+                                    onRefreshSentiment = {
+                                        aiViewModel.refreshMarketSentiment(
+                                            riskConfig = riskConfig,
+                                            openRiskPct = openRiskPct
+                                        )
+                                    }
+                                )
+                            }
+
+                            MeridianTab.LEDGER -> LedgerScreen(
                                 signals = allSignals,
+                                eventsState = eventsState,
+                                chainVerification = chainVerification,
+                                viewModel = viewModel,
+                                isTabletMode = useTabletShell,
+                                onShowMessage = { msg ->
+                                    scope.launch { snackbarHostState.showSnackbar(msg) }
+                                }
+                            )
+
+                            MeridianTab.LAB -> LabScreen(
+                                storedReports = reports,
+                                liveDetails = liveDetails,
+                                validatingStrategyId = validatingStrategyId,
+                                isTabletMode = useTabletShell,
+                                onValidateStrategy = { viewModel.runStrategyValidation(it) },
+                                onImportCsv = handleCsvUri
+                            )
+
+                            MeridianTab.AI_HUB -> AiHubScreen(
+                                aiViewModel = aiViewModel,
+                                deskContext = deskContext,
+                                signals = allSignals,
+                                candlesBySymbol = candlesBySymbol,
+                                riskConfig = riskConfig,
                                 spotRates = spotRates,
                                 qualityIssues = qualityIssues,
-                                viewModel = viewModel,
-                                candlesBySymbol = candlesBySymbol,
-                                sentimentState = sentimentState,
-                                activeRiskAlerts = activeRiskAlerts,
-                                live24hEnabled = live24hEnabled,
-                                onToggleLive24h = toggleLiveMonitor,
-                                onDismissRiskAlert = { viewModel.dismissRiskAlert(it) },
-                                onRefreshSentiment = {
-                                    aiViewModel.refreshMarketSentiment(
-                                        riskConfig = riskConfig,
-                                        openRiskPct = openRiskPct
-                                    )
+                                initialPrompt = pendingAiPrompt,
+                                isTabletMode = useTabletShell,
+                                onConsumeInitialPrompt = { pendingAiPrompt = null },
+                                onShowMessage = { msg ->
+                                    scope.launch { snackbarHostState.showSnackbar(msg) }
                                 }
                             )
                         }
-
-                        MeridianTab.LEDGER -> LedgerScreen(
-                            signals = allSignals,
-                            eventsState = eventsState,
-                            chainVerification = chainVerification,
-                            viewModel = viewModel,
-                            onShowMessage = { msg ->
-                                scope.launch { snackbarHostState.showSnackbar(msg) }
-                            }
-                        )
-
-                        MeridianTab.LAB -> LabScreen(
-                            storedReports = reports,
-                            liveDetails = liveDetails,
-                            validatingStrategyId = validatingStrategyId,
-                            onValidateStrategy = { viewModel.runStrategyValidation(it) },
-                            onImportCsv = handleCsvUri
-                        )
-
-                        MeridianTab.AI_HUB -> AiHubScreen(
-                            aiViewModel = aiViewModel,
-                            deskContext = deskContext,
-                            signals = allSignals,
-                            candlesBySymbol = candlesBySymbol,
-                            riskConfig = riskConfig,
-                            spotRates = spotRates,
-                            qualityIssues = qualityIssues,
-                            initialPrompt = pendingAiPrompt,
-                            onConsumeInitialPrompt = { pendingAiPrompt = null },
-                            onShowMessage = { msg ->
-                                scope.launch { snackbarHostState.showSnackbar(msg) }
-                            }
-                        )
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun TabletOverviewStrip(
+    netPaperR: Double,
+    openSignalsCount: Int,
+    openRiskPct: Double,
+    maxOpenRiskPct: Double,
+    sentimentState: MarketSentimentState,
+    isHalted: Boolean,
+    onSelectTab: (MeridianTab) -> Unit
+) {
+    val sentimentReport = (sentimentState as? MarketSentimentState.Success)?.report
+    val sentimentLabel = sentimentReport?.regime?.displayLabel ?: "READY"
+    val sentimentColor = when {
+        sentimentReport == null -> MeridianTeal
+        sentimentReport.overallScore >= 20 -> BullEmerald
+        sentimentReport.overallScore <= -20 -> BearCrimson
+        else -> WarnAmber
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(GraphiteSurface)
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .testTag("tablet_overview_strip"),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        TabletOverviewChip(
+            label = "SIGNALS",
+            value = "$openSignalsCount OPEN",
+            accent = MeridianTeal,
+            onClick = { onSelectTab(MeridianTab.SIGNALS) }
+        )
+        TabletOverviewChip(
+            label = "HEAT",
+            value = "${"%.2f".format(openRiskPct)}% / ${"%.1f".format(maxOpenRiskPct)}%",
+            accent = if (openRiskPct >= maxOpenRiskPct) BearCrimson else BullEmerald,
+            onClick = { onSelectTab(MeridianTab.RISK) }
+        )
+        TabletOverviewChip(
+            label = "NET PAPER R",
+            value = "${if (netPaperR >= 0) "+" else ""}${"%.2f".format(netPaperR)}R",
+            accent = if (netPaperR >= 0) BullEmerald else BearCrimson,
+            onClick = { onSelectTab(MeridianTab.LEDGER) }
+        )
+        TabletOverviewChip(
+            label = "AI SENTIMENT",
+            value = sentimentLabel,
+            accent = sentimentColor,
+            onClick = { onSelectTab(MeridianTab.AI_HUB) }
+        )
+        TabletOverviewChip(
+            label = "GUARDIAN",
+            value = if (isHalted) "HALTED" else "ARMED",
+            accent = if (isHalted) BearCrimson else BullEmerald,
+            onClick = { onSelectTab(MeridianTab.RISK) }
+        )
+    }
+}
+
+@Composable
+private fun TabletOverviewChip(
+    label: String,
+    value: String,
+    accent: androidx.compose.ui.graphics.Color,
+    onClick: () -> Unit
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = SlateCard),
+        border = BorderStroke(1.dp, HairlineBorder),
+        modifier = Modifier
+            .heightIn(min = 48.dp)
+            .clickable(onClick = onClick)
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(1.dp)
+        ) {
+            Text(text = label, style = MaterialTheme.typography.labelSmall, color = InkSecondary)
+            Text(text = value, style = MonoMetricSmall, color = accent)
         }
     }
 }

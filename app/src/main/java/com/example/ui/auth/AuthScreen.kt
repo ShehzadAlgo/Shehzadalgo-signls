@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -110,12 +111,12 @@ fun AuthScreen(
             verticalArrangement = Arrangement.spacedBy(18.dp)
         ) {
             Image(
-                painter = painterResource(id = R.drawable.ic_meridian_logo_1794670022420),
+                painter = painterResource(id = R.drawable.ic_shehzad_algo_logo),
                 contentDescription = stringResource(R.string.cd_meridian_logo),
-                contentScale = ContentScale.Crop,
+                contentScale = ContentScale.Fit,
                 modifier = Modifier
-                    .size(84.dp)
-                    .clip(RoundedCornerShape(18.dp))
+                    .size(96.dp)
+                    .clip(CircleShape)
             )
 
             Column(horizontalAlignment = Alignment.CenterHorizontally) {

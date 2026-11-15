@@ -342,7 +342,7 @@ fun PairAiAnalysisCard(
             IconButton(
                 onClick = onClose,
                 modifier = Modifier
-                    .size(40.dp)
+                    .size(48.dp)
                     .testTag("close_pair_analysis_button")
             ) {
                 Icon(Icons.Outlined.Close, contentDescription = "Close pair analysis", tint = InkSecondary)

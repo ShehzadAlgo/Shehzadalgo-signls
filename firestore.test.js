@@ -172,10 +172,19 @@ test("Owner can create and read risk_config, signals, signal_events, and strateg
   await assertSucceeds(aliceRef.collection("risk_config").doc("default").set(validRiskConfig(ALICE_UID)));
   await assertSucceeds(aliceRef.collection("signals").doc("sig_1042").set(validSignal(ALICE_UID)));
   await assertSucceeds(aliceRef.collection("signal_events").doc("ev_0").set(validSignalEvent(ALICE_UID)));
+  await assertSucceeds(
+    aliceRef.collection("ledger_state").doc("signal_events").set({
+      userId: ALICE_UID,
+      lastSequenceIndex: 0,
+      lastEventHash: "a".repeat(64),
+      updatedAt: new Date(),
+    })
+  );
   await assertSucceeds(aliceRef.collection("strategy_reports").doc("S1_TREND_DONCHIAN").set(validValidationReport(ALICE_UID)));
 
   await assertSucceeds(aliceRef.collection("signals").get());
   await assertSucceeds(aliceRef.collection("signal_events").get());
+  await assertSucceeds(aliceRef.collection("ledger_state").doc("signal_events").get());
 });
 
 test("Cross-user access is strictly denied", async () => {

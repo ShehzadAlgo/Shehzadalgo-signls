@@ -121,6 +121,7 @@ fun SignalsScreen(
     verificationsBySignalKey: Map<String, AiVerificationState> = emptyMap(),
     pairAnalysisState: PairAiAnalysisState = PairAiAnalysisState.Idle,
     live24hEnabled: Boolean = false,
+    isTabletMode: Boolean = false,
     onToggleLive24h: (Boolean) -> Unit = {},
     onScanClosedBars: () -> Unit,
     onUpdateStatus: (SignalRecord, SignalStatus, Double) -> Unit,
@@ -167,16 +168,26 @@ fun SignalsScreen(
     }
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-        val isWide = maxWidth >= 840.dp
+        val useHorizontalSplit = maxWidth >= 720.dp
+        val useStackedTabletSplit = isTabletMode && !useHorizontalSplit
+        val useDualPane = useHorizontalSplit || useStackedTabletSplit
 
-        Row(modifier = Modifier.fillMaxSize()) {
+        val activeDetailSignal = if (useDualPane) {
+            val current = selectedSignal
+            if (current != null) {
+                allSignals.firstOrNull { it.id == current.id } ?: filteredSignals.firstOrNull() ?: current
+            } else {
+                filteredSignals.firstOrNull() ?: allSignals.firstOrNull()
+            }
+        } else {
+            selectedSignal?.let { sel -> allSignals.firstOrNull { it.id == sel.id } ?: sel }
+        }
+
+        val feedContent: @Composable (Modifier) -> Unit = { mod ->
             LazyColumn(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxHeight()
-                    .testTag("signals_lazy_column"),
-                contentPadding = PaddingValues(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                modifier = mod.testTag("signals_lazy_column"),
+                contentPadding = PaddingValues(if (useDualPane) 12.dp else 16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 item {
                     TerminalScanHeader(
@@ -290,7 +301,7 @@ fun SignalsScreen(
                                 val vState = verificationsBySignalKey[AiHubViewModel.signalKeyFor(sig)]
                                 SignalCard(
                                     signal = sig,
-                                    isSelected = selectedSignal?.id == sig.id,
+                                    isSelected = activeDetailSignal?.id == sig.id && useDualPane || selectedSignal?.id == sig.id,
                                     verificationState = vState,
                                     onClick = { selectedSignal = sig }
                                 )
@@ -308,42 +319,96 @@ fun SignalsScreen(
                     )
                 }
             }
+        }
 
-            if (isWide && selectedSignal != null) {
-                val active = allSignals.firstOrNull { it.id == selectedSignal?.id } ?: selectedSignal!!
-                val activeCandles = candlesBySymbol[active.instrument].orEmpty()
-                val activeAnalytics = remember(active, activeCandles, riskConfig, allSignals, spotRates, qualityIssues) {
-                    MarketAnalyticsEngine.compute(active, activeCandles, riskConfig, allSignals, spotRates, qualityIssues)
+        val detailPane: @Composable (Modifier) -> Unit = { mod ->
+            val containerMod = mod
+                .background(GraphiteSurface)
+                .border(1.dp, HairlineBorder)
+            if (activeDetailSignal != null) {
+                val activeCandles = candlesBySymbol[activeDetailSignal.instrument].orEmpty()
+                val activeAnalytics = remember(activeDetailSignal, activeCandles, riskConfig, allSignals, spotRates, qualityIssues) {
+                    MarketAnalyticsEngine.compute(activeDetailSignal, activeCandles, riskConfig, allSignals, spotRates, qualityIssues)
                 }
-                val activeVerification = verificationsBySignalKey[AiHubViewModel.signalKeyFor(active)] ?: AiVerificationState.Idle
+                val activeVerification = verificationsBySignalKey[AiHubViewModel.signalKeyFor(activeDetailSignal)]
+                    ?: AiVerificationState.Idle
                 Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                        .background(GraphiteSurface)
-                        .border(1.dp, HairlineBorder)
+                    modifier = containerMod
                         .verticalScroll(rememberScrollState())
-                        .padding(16.dp)
+                        .padding(14.dp)
+                        .testTag("tablet_signal_detail_pane")
                 ) {
                     SignalDetailContent(
-                        signal = active,
+                        signal = activeDetailSignal,
                         candles = activeCandles,
                         analytics = activeAnalytics,
                         verificationState = activeVerification,
-                        onUpdateStatus = { st, r -> onUpdateStatus(active, st, r) },
-                        onVerifyWithAi = { onVerifySignalWithAi(active, activeAnalytics) },
-                        onAnalyzeWithAi = { onAnalyzeWithAi(active) },
+                        onUpdateStatus = { st, r -> onUpdateStatus(activeDetailSignal, st, r) },
+                        onVerifyWithAi = { onVerifySignalWithAi(activeDetailSignal, activeAnalytics) },
+                        onAnalyzeWithAi = { onAnalyzeWithAi(activeDetailSignal) },
                         onCopyTelegram = {
-                            copyToClipboard(context, TelegramFormatter.formatSignal(active))
+                            copyToClipboard(context, TelegramFormatter.formatSignal(activeDetailSignal))
                             onShowMessage("Copied Telegram signal format to clipboard.")
                         }
                     )
                 }
+            } else {
+                Box(
+                    modifier = containerMod
+                        .padding(16.dp)
+                        .testTag("tablet_signal_detail_pane"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Shield,
+                            contentDescription = null,
+                            tint = MeridianTeal,
+                            modifier = Modifier.size(32.dp)
+                        )
+                        Text(
+                            text = "LIVE INSPECTOR READY",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MeridianTeal
+                        )
+                        Text(
+                            text = "Run Scan Closed Bars or search any pair above to view live candlestick levels, Market Analytics, and Gemini Verification here.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = InkSecondary
+                        )
+                    }
+                }
             }
         }
 
-        if (!isWide && selectedSignal != null) {
-            val active = allSignals.firstOrNull { it.id == selectedSignal?.id } ?: selectedSignal!!
+        if (useHorizontalSplit) {
+            Row(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag("tablet_dual_pane_signals")
+            ) {
+                feedContent(Modifier.weight(0.46f).fillMaxHeight())
+                detailPane(Modifier.weight(0.54f).fillMaxHeight())
+            }
+        } else if (useStackedTabletSplit) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag("tablet_dual_pane_signals")
+            ) {
+                feedContent(Modifier.fillMaxWidth().weight(0.48f))
+                HorizontalDivider(thickness = 1.dp, color = MeridianTeal.copy(alpha = 0.45f))
+                detailPane(Modifier.fillMaxWidth().weight(0.52f))
+            }
+        } else {
+            feedContent(Modifier.fillMaxSize())
+        }
+
+        if (!useDualPane && activeDetailSignal != null) {
+            val active = activeDetailSignal
             val activeCandles = candlesBySymbol[active.instrument].orEmpty()
             val activeAnalytics = remember(active, activeCandles, riskConfig, allSignals, spotRates, qualityIssues) {
                 MarketAnalyticsEngine.compute(active, activeCandles, riskConfig, allSignals, spotRates, qualityIssues)

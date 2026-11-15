@@ -5,10 +5,12 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -32,6 +34,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -39,6 +42,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -101,6 +105,7 @@ fun RiskScreen(
     sentimentState: MarketSentimentState = MarketSentimentState.Idle,
     activeRiskAlerts: List<RiskAlertEvent> = emptyList(),
     live24hEnabled: Boolean = false,
+    isTabletMode: Boolean = false,
     onToggleLive24h: (Boolean) -> Unit = {},
     onDismissRiskAlert: (String) -> Unit = {},
     onRefreshSentiment: () -> Unit = {}
@@ -114,6 +119,7 @@ fun RiskScreen(
         sentimentState = sentimentState,
         activeRiskAlerts = activeRiskAlerts,
         live24hEnabled = live24hEnabled,
+        isTabletMode = isTabletMode,
         onToggleLive24h = onToggleLive24h,
         onDismissRiskAlert = onDismissRiskAlert,
         onActiveStopTargetChanged = { target -> viewModel.evaluateRiskProximity(target) },
@@ -134,6 +140,7 @@ fun RiskDashboardContent(
     sentimentState: MarketSentimentState = MarketSentimentState.Idle,
     activeRiskAlerts: List<RiskAlertEvent> = emptyList(),
     live24hEnabled: Boolean = false,
+    isTabletMode: Boolean = false,
     onToggleLive24h: (Boolean) -> Unit = {},
     onDismissRiskAlert: (String) -> Unit = {},
     onActiveStopTargetChanged: (ActiveStopWatchTarget) -> Unit = {},
@@ -278,22 +285,14 @@ fun RiskDashboardContent(
         }
     }
 
-    LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .testTag("risk_dashboard_list"),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
-        // 0. Persistent Volatility Stop-Loss Proximity Alert & 24H Live Monitor Indicator
-        item {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                RiskAlertBanner(
-                    alerts = activeRiskAlerts,
-                    live24hEnabled = live24hEnabled,
-                    openMonitoredCount = exposure.openCount,
-                    onDismissAlert = onDismissRiskAlert
-                )
+    val alertsAndMonitorBlock: @Composable () -> Unit = {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            RiskAlertBanner(
+                alerts = activeRiskAlerts,
+                live24hEnabled = live24hEnabled,
+                openMonitoredCount = exposure.openCount,
+                onDismissAlert = onDismissRiskAlert
+            )
                 Card(
                     colors = CardDefaults.cardColors(containerColor = SlateCard),
                     border = BorderStroke(1.dp, if (live24hEnabled) BullEmerald else HairlineBorder),
@@ -328,19 +327,18 @@ fun RiskDashboardContent(
                             modifier = Modifier.testTag("risk_live_24h_switch")
                         )
                     }
-                }
             }
         }
+    }
 
-        // 1. Kill Switch & Risk Gate Card
-        item {
-            Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = if (riskConfig.manualKillSwitch) BearCrimsonTint else SlateCard
-                ),
-                border = BorderStroke(1.dp, if (riskConfig.manualKillSwitch) BearCrimson else HairlineBorder),
-                modifier = Modifier.fillMaxWidth()
-            ) {
+    val killSwitchBlock: @Composable () -> Unit = {
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = if (riskConfig.manualKillSwitch) BearCrimsonTint else SlateCard
+            ),
+            border = BorderStroke(1.dp, if (riskConfig.manualKillSwitch) BearCrimson else HairlineBorder),
+            modifier = Modifier.fillMaxWidth()
+        ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -386,14 +384,13 @@ fun RiskDashboardContent(
             }
         }
 
-        // 2. Real-Time Risk Telemetry Pulse Strip
-        item {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("risk_pulse_strip"),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
+    val pulseStripBlock: @Composable () -> Unit = {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("risk_pulse_strip"),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
                 RiskPulseTile(
                     label = "PORTFOLIO HEAT",
                     value = "${"%.2f".format(exposure.openRiskPct)}%",
@@ -415,12 +412,11 @@ fun RiskDashboardContent(
                     accent = if (abs(exposure.cryptoNetBtcBetaPct) > riskConfig.maxClusterRiskPct * 1.5) BearCrimson else WarnAmber,
                     modifier = Modifier.weight(1f)
                 )
-            }
         }
+    }
 
-        // 2b. Gemini AI Real-Time Crypto/Forex Market Sentiment Gauge
-        item {
-            MarketSentimentGaugeCard(
+    val sentimentBlock: @Composable () -> Unit = {
+        MarketSentimentGaugeCard(
                 sentimentState = sentimentState,
                 riskConfig = riskConfig,
                 sentimentOverlayEnabled = sentimentOverlayEnabled,
@@ -434,16 +430,15 @@ fun RiskDashboardContent(
                     riskPctText = updated.riskPerTradePct.toString()
                     onSaveRiskConfig(updated, false)
                 }
-            )
-        }
+        )
+    }
 
-        // 3. Volatility-Adjusted Stop-Loss Chart & Controls
-        item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = SlateCard),
-                border = BorderStroke(1.dp, HairlineBorder),
-                modifier = Modifier.fillMaxWidth()
-            ) {
+    val volStopBlock: @Composable () -> Unit = {
+        Card(
+            colors = CardDefaults.cardColors(containerColor = SlateCard),
+            border = BorderStroke(1.dp, HairlineBorder),
+            modifier = Modifier.fillMaxWidth()
+        ) {
                 Column(
                     modifier = Modifier.padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -584,13 +579,12 @@ fun RiskDashboardContent(
             }
         }
 
-        // 4. Position Size Calculator & Sensitivity Curve Chart
-        item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = SlateCard),
-                border = BorderStroke(1.dp, HairlineBorder),
-                modifier = Modifier.fillMaxWidth()
-            ) {
+    val sizingBlock: @Composable () -> Unit = {
+        Card(
+            colors = CardDefaults.cardColors(containerColor = SlateCard),
+            border = BorderStroke(1.dp, HairlineBorder),
+            modifier = Modifier.fillMaxWidth()
+        ) {
                 Column(
                     modifier = Modifier.padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -708,13 +702,12 @@ fun RiskDashboardContent(
             }
         }
 
-        // 5. Real-Time Portfolio & Currency/Cluster Exposure Monitor
-        item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = SlateCard),
-                border = BorderStroke(1.dp, HairlineBorder),
-                modifier = Modifier.fillMaxWidth()
-            ) {
+    val exposureBlock: @Composable () -> Unit = {
+        Card(
+            colors = CardDefaults.cardColors(containerColor = SlateCard),
+            border = BorderStroke(1.dp, HairlineBorder),
+            modifier = Modifier.fillMaxWidth()
+        ) {
                 Column(
                     modifier = Modifier.padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -777,13 +770,12 @@ fun RiskDashboardContent(
             }
         }
 
-        // 6. Persisted Risk Governance Config
-        item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = SlateCard),
-                border = BorderStroke(1.dp, HairlineBorder),
-                modifier = Modifier.fillMaxWidth()
-            ) {
+    val configBlock: @Composable () -> Unit = {
+        Card(
+            colors = CardDefaults.cardColors(containerColor = SlateCard),
+            border = BorderStroke(1.dp, HairlineBorder),
+            modifier = Modifier.fillMaxWidth()
+        ) {
                 Column(
                     modifier = Modifier.padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -851,29 +843,128 @@ fun RiskDashboardContent(
             }
         }
 
-        // 7. Data Quality Guardrail Alerts
-        if (qualityIssues.isNotEmpty()) {
-            item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = WarnAmberTint),
-                    border = BorderStroke(1.dp, WarnAmber),
-                    modifier = Modifier.fillMaxWidth()
+    val qualityBlock: @Composable () -> Unit = {
+        Card(
+            colors = CardDefaults.cardColors(containerColor = WarnAmberTint),
+            border = BorderStroke(1.dp, WarnAmber),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Icon(Icons.Outlined.WarningAmber, contentDescription = null, tint = WarnAmber)
+                    Text("DATA QUALITY ISSUES (${qualityIssues.size})", style = MaterialTheme.typography.labelMedium, color = WarnAmber)
+                }
+                qualityIssues.take(8).forEach { issue ->
+                    Text(
+                        text = "• ${issue.instrument} ${issue.timeframe.wire} [${issue.issueType.name}]: ${issue.description}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = InkPrimary
+                    )
+                }
+            }
+        }
+    }
+
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val isWideTablet = maxWidth >= 720.dp
+        val useDualPane = isTabletMode || isWideTablet
+
+        when {
+            isWideTablet -> {
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag("tablet_dual_pane_risk")
                 ) {
-                    Column(
-                        modifier = Modifier.padding(14.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    LazyColumn(
+                        modifier = Modifier
+                            .weight(0.46f)
+                            .fillMaxHeight(),
+                        contentPadding = PaddingValues(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Icon(Icons.Outlined.WarningAmber, contentDescription = null, tint = WarnAmber)
-                            Text("DATA QUALITY ISSUES (${qualityIssues.size})", style = MaterialTheme.typography.labelMedium, color = WarnAmber)
+                        item { alertsAndMonitorBlock() }
+                        item { killSwitchBlock() }
+                        item { pulseStripBlock() }
+                        item { sentimentBlock() }
+                        item { configBlock() }
+                        if (qualityIssues.isNotEmpty()) {
+                            item { qualityBlock() }
                         }
-                        qualityIssues.take(8).forEach { issue ->
-                            Text(
-                                text = "• ${issue.instrument} ${issue.timeframe.wire} [${issue.issueType.name}]: ${issue.description}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = InkPrimary
-                            )
+                    }
+                    VerticalDivider(color = HairlineBorder)
+                    LazyColumn(
+                        modifier = Modifier
+                            .weight(0.54f)
+                            .fillMaxHeight(),
+                        contentPadding = PaddingValues(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        item { volStopBlock() }
+                        item { sizingBlock() }
+                        item { exposureBlock() }
+                    }
+                }
+            }
+
+            useDualPane -> {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag("tablet_dual_pane_risk")
+                ) {
+                    LazyColumn(
+                        modifier = Modifier
+                            .weight(0.45f)
+                            .fillMaxWidth(),
+                        contentPadding = PaddingValues(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        item { alertsAndMonitorBlock() }
+                        item { pulseStripBlock() }
+                        item { sentimentBlock() }
+                        item { killSwitchBlock() }
+                        item { configBlock() }
+                        if (qualityIssues.isNotEmpty()) {
+                            item { qualityBlock() }
                         }
+                    }
+                    HorizontalDivider(color = HairlineBorder, thickness = 1.dp)
+                    LazyColumn(
+                        modifier = Modifier
+                            .weight(0.55f)
+                            .fillMaxWidth(),
+                        contentPadding = PaddingValues(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        item { volStopBlock() }
+                        item { sizingBlock() }
+                        item { exposureBlock() }
+                    }
+                }
+            }
+
+            else -> {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag("risk_dashboard_list"),
+                    contentPadding = PaddingValues(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    item { alertsAndMonitorBlock() }
+                    item { killSwitchBlock() }
+                    item { pulseStripBlock() }
+                    item { sentimentBlock() }
+                    item { volStopBlock() }
+                    item { sizingBlock() }
+                    item { exposureBlock() }
+                    item { configBlock() }
+                    if (qualityIssues.isNotEmpty()) {
+                        item { qualityBlock() }
                     }
                 }
             }

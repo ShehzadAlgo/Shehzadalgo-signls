@@ -11,10 +11,12 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -57,6 +59,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -117,6 +120,7 @@ fun AiHubScreen(
     spotRates: Map<String, Double> = emptyMap(),
     qualityIssues: List<DataQualityIssue> = emptyList(),
     initialPrompt: String?,
+    isTabletMode: Boolean = false,
     onConsumeInitialPrompt: () -> Unit,
     onShowMessage: (String) -> Unit
 ) {
@@ -155,200 +159,149 @@ fun AiHubScreen(
     val activeModel = settings.activeModel(activeProvider)
     val needsKeyNow = activeProvider.requiresApiKey && settings.apiKey(activeProvider).isBlank()
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(ObsidianBg)
-    ) {
-        LazyColumn(
-            state = listState,
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            item {
-                AiEngineHeaderCard(
-                    settings = settings,
-                    activeProvider = activeProvider,
-                    activeModel = activeModel,
-                    needsKeyNow = needsKeyNow,
-                    showWebPortals = showWebPortals,
-                    onToggleWebPortals = { showWebPortals = !showWebPortals },
-                    onSelectProvider = { aiViewModel.selectProvider(it) },
-                    onOpenConfig = { showConfigSheet = true },
-                    onToggleContext = { aiViewModel.setIncludeDeskContext(it) },
-                    onClearChat = { aiViewModel.clearChat() }
-                )
-            }
+    val headerBlock: @Composable () -> Unit = {
+        AiEngineHeaderCard(
+            settings = settings,
+            activeProvider = activeProvider,
+            activeModel = activeModel,
+            needsKeyNow = needsKeyNow,
+            showWebPortals = showWebPortals,
+            onToggleWebPortals = { showWebPortals = !showWebPortals },
+            onSelectProvider = { aiViewModel.selectProvider(it) },
+            onOpenConfig = { showConfigSheet = true },
+            onToggleContext = { aiViewModel.setIncludeDeskContext(it) },
+            onClearChat = { aiViewModel.clearChat() }
+        )
+    }
 
-            if (signals.isNotEmpty()) {
-                item {
-                    val verifiableSignals = remember(signals) {
-                        (signals.filter { SignalStatus.fromWire(it.status).isOpen } +
-                            signals.filter { !SignalStatus.fromWire(it.status).isOpen }).take(8)
-                    }
-                    val targetSignal = verifiableSignals.firstOrNull {
-                        AiHubViewModel.signalKeyFor(it) == selectedVerifySignalKey
-                    } ?: verifiableSignals.first()
-                    val targetKey = AiHubViewModel.signalKeyFor(targetSignal)
-                    val targetCandles = candlesBySymbol[targetSignal.instrument].orEmpty()
-                    val targetAnalytics = remember(targetSignal, targetCandles, riskConfig, signals, spotRates, qualityIssues) {
-                        MarketAnalyticsEngine.compute(targetSignal, targetCandles, riskConfig, signals, spotRates, qualityIssues)
-                    }
-                    val targetDecimals = if (targetSignal.instrument.endsWith("JPY")) 3 else if (targetSignal.assetClass == "crypto") 2 else 5
-                    val targetVerification = verificationsByKey[targetKey] ?: AiVerificationState.Idle
+    val signalVerifierBlock: @Composable () -> Unit = {
+        val verifiableSignals = remember(signals) {
+            (signals.filter { SignalStatus.fromWire(it.status).isOpen } +
+                signals.filter { !SignalStatus.fromWire(it.status).isOpen }).take(8)
+        }
+        val targetSignal = verifiableSignals.firstOrNull {
+            AiHubViewModel.signalKeyFor(it) == selectedVerifySignalKey
+        } ?: verifiableSignals.first()
+        val targetKey = AiHubViewModel.signalKeyFor(targetSignal)
+        val targetCandles = candlesBySymbol[targetSignal.instrument].orEmpty()
+        val targetAnalytics = remember(targetSignal, targetCandles, riskConfig, signals, spotRates, qualityIssues) {
+            MarketAnalyticsEngine.compute(targetSignal, targetCandles, riskConfig, signals, spotRates, qualityIssues)
+        }
+        val targetDecimals = if (targetSignal.instrument.endsWith("JPY")) 3 else if (targetSignal.assetClass == "crypto") 2 else 5
+        val targetVerification = verificationsByKey[targetKey] ?: AiVerificationState.Idle
 
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Card(
-                            colors = CardDefaults.cardColors(containerColor = SlateCard),
-                            border = BorderStroke(1.dp, HairlineBorder),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(12.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Text(
-                                    text = "SELECT SIGNAL TO VERIFY & AUDIT RISK",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MeridianTeal
-                                )
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .horizontalScroll(rememberScrollState()),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    verifiableSignals.forEach { sig ->
-                                        val sKey = AiHubViewModel.signalKeyFor(sig)
-                                        FilterChip(
-                                            selected = sKey == targetKey,
-                                            onClick = { selectedVerifySignalKey = sKey },
-                                            label = {
-                                                Text(
-                                                    text = "${sig.instrument} ${sig.direction.uppercase()} (${sig.timeframe})",
-                                                    style = MaterialTheme.typography.labelSmall
-                                                )
-                                            },
-                                            colors = FilterChipDefaults.filterChipColors(
-                                                selectedContainerColor = MeridianTealTint,
-                                                selectedLabelColor = MeridianTeal
-                                            )
-                                        )
-                                    }
-                                }
-                            }
-                        }
-
-                        MarketAnalyticsCard(
-                            analytics = targetAnalytics,
-                            decimals = targetDecimals
-                        )
-
-                        AiVerificationScorecard(
-                            verificationState = targetVerification,
-                            onVerifyClick = {
-                                aiViewModel.verifySignalAsTrader(targetSignal, targetAnalytics, deskContext)
-                            }
-                        )
-                    }
-                }
-            }
-
-            if (showWebPortals) {
-                item {
-                    WebAiPortalsStrip(
-                        onOpenPortal = { portal ->
-                            val promptToCopy = buildString {
-                                appendLine("Analyze my Shehzad Algo quantitative trading desk snapshot (explain risks, R/R, costs, and regime — no financial advice):")
-                                appendLine()
-                                append(deskContext)
-                            }
-                            copyText(context, "Shehzad Algo Desk Context", promptToCopy)
-                            onShowMessage("Desk context copied — paste directly in ${portal.name}.")
-                            runCatching {
-                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(portal.url))
-                                context.startActivity(intent)
-                            }.onFailure {
-                                onShowMessage("Could not open browser for ${portal.name}.")
-                            }
-                        }
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = SlateCard),
+                border = BorderStroke(1.dp, HairlineBorder),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "SELECT SIGNAL TO VERIFY & AUDIT RISK",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MeridianTeal
                     )
-                }
-            }
-
-            item {
-                QuickPromptRow(
-                    enabled = !isGenerating,
-                    onPromptClick = { prompt ->
-                        aiViewModel.sendMessage(prompt, deskContext)
-                    }
-                )
-            }
-
-            if (errorBanner != null) {
-                item {
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = BearCrimsonTint),
-                        border = BorderStroke(1.dp, BearCrimson),
-                        modifier = Modifier.fillMaxWidth()
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Column(
-                            modifier = Modifier.padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Text(
-                                text = errorBanner ?: "",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = InkPrimary
+                        verifiableSignals.forEach { sig ->
+                            val sKey = AiHubViewModel.signalKeyFor(sig)
+                            FilterChip(
+                                selected = sKey == targetKey,
+                                onClick = { selectedVerifySignalKey = sKey },
+                                label = {
+                                    Text(
+                                        text = "${sig.instrument} ${sig.direction.uppercase()} (${sig.timeframe})",
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = MeridianTealTint,
+                                    selectedLabelColor = MeridianTeal
+                                )
                             )
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                OutlinedButton(
-                                    onClick = { aiViewModel.selectProvider(AiProviderType.FIREBASE_GEMINI) },
-                                    border = BorderStroke(1.dp, MeridianTeal),
-                                    modifier = Modifier.height(40.dp)
-                                ) {
-                                    Text("Use Free Gemini", color = MeridianTeal, style = MaterialTheme.typography.labelSmall)
-                                }
-                                OutlinedButton(
-                                    onClick = { showConfigSheet = true },
-                                    border = BorderStroke(1.dp, HairlineBorder),
-                                    modifier = Modifier.height(40.dp)
-                                ) {
-                                    Text("Setup Key", color = InkPrimary, style = MaterialTheme.typography.labelSmall)
-                                }
-                            }
                         }
                     }
                 }
             }
 
-            if (messages.isEmpty()) {
-                item {
-                    EmptyAiCard(
-                        activeProvider = activeProvider,
-                        needsKey = needsKeyNow,
-                        onOpenConfig = { showConfigSheet = true },
-                        onSamplePrompt = { aiViewModel.sendMessage(it, deskContext) }
-                    )
+            MarketAnalyticsCard(
+                analytics = targetAnalytics,
+                decimals = targetDecimals
+            )
+
+            AiVerificationScorecard(
+                verificationState = targetVerification,
+                onVerifyClick = {
+                    aiViewModel.verifySignalAsTrader(targetSignal, targetAnalytics, deskContext)
                 }
-            } else {
-                items(messages, key = { it.id }) { msg ->
-                    ChatMessageBubble(
-                        message = msg,
-                        onCopy = {
-                            copyText(context, "Shehzad Algo AI", msg.content)
-                            onShowMessage("AI response copied to clipboard.")
-                        }
-                    )
+            )
+        }
+    }
+
+    val webPortalsBlock: @Composable () -> Unit = {
+        WebAiPortalsStrip(
+            onOpenPortal = { portal ->
+                val promptToCopy = buildString {
+                    appendLine("Analyze my Shehzad Algo quantitative trading desk snapshot (explain risks, R/R, costs, and regime — no financial advice):")
+                    appendLine()
+                    append(deskContext)
+                }
+                copyText(context, "Shehzad Algo Desk Context", promptToCopy)
+                onShowMessage("Desk context copied — paste directly in ${portal.name}.")
+                runCatching {
+                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(portal.url))
+                    context.startActivity(intent)
+                }.onFailure {
+                    onShowMessage("Could not open browser for ${portal.name}.")
+                }
+            }
+        )
+    }
+
+    val errorBannerBlock: @Composable () -> Unit = {
+        Card(
+            colors = CardDefaults.cardColors(containerColor = BearCrimsonTint),
+            border = BorderStroke(1.dp, BearCrimson),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = errorBanner ?: "",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = InkPrimary
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = { aiViewModel.selectProvider(AiProviderType.FIREBASE_GEMINI) },
+                        border = BorderStroke(1.dp, MeridianTeal),
+                        modifier = Modifier.height(40.dp)
+                    ) {
+                        Text("Use Free Gemini", color = MeridianTeal, style = MaterialTheme.typography.labelSmall)
+                    }
+                    OutlinedButton(
+                        onClick = { showConfigSheet = true },
+                        border = BorderStroke(1.dp, HairlineBorder),
+                        modifier = Modifier.height(40.dp)
+                    ) {
+                        Text("Setup Key", color = InkPrimary, style = MaterialTheme.typography.labelSmall)
+                    }
                 }
             }
         }
+    }
 
-        HorizontalDivider(color = HairlineBorder)
-
+    val composerBar: @Composable () -> Unit = {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -412,6 +365,218 @@ fun AiHubScreen(
                         contentDescription = "Send prompt",
                         tint = if (inputText.isNotBlank()) ObsidianBg else InkSecondary
                     )
+                }
+            }
+        }
+    }
+
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(ObsidianBg)
+    ) {
+        val isWideTablet = maxWidth >= 720.dp
+        val useDualPane = isTabletMode || isWideTablet
+
+        when {
+            isWideTablet -> {
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag("tablet_dual_pane_ai_hub")
+                ) {
+                    LazyColumn(
+                        modifier = Modifier
+                            .weight(0.45f)
+                            .fillMaxHeight(),
+                        contentPadding = PaddingValues(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        item { headerBlock() }
+                        if (signals.isNotEmpty()) {
+                            item { signalVerifierBlock() }
+                        }
+                    }
+                    VerticalDivider(color = HairlineBorder)
+                    Column(
+                        modifier = Modifier
+                            .weight(0.55f)
+                            .fillMaxHeight()
+                    ) {
+                        LazyColumn(
+                            state = listState,
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth(),
+                            contentPadding = PaddingValues(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            if (showWebPortals) {
+                                item { webPortalsBlock() }
+                            }
+                            item {
+                                QuickPromptRow(
+                                    enabled = !isGenerating,
+                                    onPromptClick = { prompt ->
+                                        aiViewModel.sendMessage(prompt, deskContext)
+                                    }
+                                )
+                            }
+                            if (errorBanner != null) {
+                                item { errorBannerBlock() }
+                            }
+                            if (messages.isEmpty()) {
+                                item {
+                                    EmptyAiCard(
+                                        activeProvider = activeProvider,
+                                        needsKey = needsKeyNow,
+                                        onOpenConfig = { showConfigSheet = true },
+                                        onSamplePrompt = { aiViewModel.sendMessage(it, deskContext) }
+                                    )
+                                }
+                            } else {
+                                items(messages, key = { it.id }) { msg ->
+                                    ChatMessageBubble(
+                                        message = msg,
+                                        onCopy = {
+                                            copyText(context, "Shehzad Algo AI", msg.content)
+                                            onShowMessage("AI response copied to clipboard.")
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                        HorizontalDivider(color = HairlineBorder)
+                        composerBar()
+                    }
+                }
+            }
+
+            useDualPane -> {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag("tablet_dual_pane_ai_hub")
+                ) {
+                    LazyColumn(
+                        modifier = Modifier
+                            .weight(0.42f)
+                            .fillMaxWidth(),
+                        contentPadding = PaddingValues(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        item { headerBlock() }
+                        if (signals.isNotEmpty()) {
+                            item { signalVerifierBlock() }
+                        }
+                    }
+                    HorizontalDivider(color = HairlineBorder, thickness = 1.dp)
+                    Column(
+                        modifier = Modifier
+                            .weight(0.58f)
+                            .fillMaxWidth()
+                    ) {
+                        LazyColumn(
+                            state = listState,
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth(),
+                            contentPadding = PaddingValues(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            if (showWebPortals) {
+                                item { webPortalsBlock() }
+                            }
+                            item {
+                                QuickPromptRow(
+                                    enabled = !isGenerating,
+                                    onPromptClick = { prompt ->
+                                        aiViewModel.sendMessage(prompt, deskContext)
+                                    }
+                                )
+                            }
+                            if (errorBanner != null) {
+                                item { errorBannerBlock() }
+                            }
+                            if (messages.isEmpty()) {
+                                item {
+                                    EmptyAiCard(
+                                        activeProvider = activeProvider,
+                                        needsKey = needsKeyNow,
+                                        onOpenConfig = { showConfigSheet = true },
+                                        onSamplePrompt = { aiViewModel.sendMessage(it, deskContext) }
+                                    )
+                                }
+                            } else {
+                                items(messages, key = { it.id }) { msg ->
+                                    ChatMessageBubble(
+                                        message = msg,
+                                        onCopy = {
+                                            copyText(context, "Shehzad Algo AI", msg.content)
+                                            onShowMessage("AI response copied to clipboard.")
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                        HorizontalDivider(color = HairlineBorder)
+                        composerBar()
+                    }
+                }
+            }
+
+            else -> {
+                Column(modifier = Modifier.fillMaxSize()) {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                        contentPadding = PaddingValues(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        item { headerBlock() }
+                        if (signals.isNotEmpty()) {
+                            item { signalVerifierBlock() }
+                        }
+                        if (showWebPortals) {
+                            item { webPortalsBlock() }
+                        }
+                        item {
+                            QuickPromptRow(
+                                enabled = !isGenerating,
+                                onPromptClick = { prompt ->
+                                    aiViewModel.sendMessage(prompt, deskContext)
+                                }
+                            )
+                        }
+                        if (errorBanner != null) {
+                            item { errorBannerBlock() }
+                        }
+                        if (messages.isEmpty()) {
+                            item {
+                                EmptyAiCard(
+                                    activeProvider = activeProvider,
+                                    needsKey = needsKeyNow,
+                                    onOpenConfig = { showConfigSheet = true },
+                                    onSamplePrompt = { aiViewModel.sendMessage(it, deskContext) }
+                                )
+                            }
+                        } else {
+                            items(messages, key = { it.id }) { msg ->
+                                ChatMessageBubble(
+                                    message = msg,
+                                    onCopy = {
+                                        copyText(context, "Shehzad Algo AI", msg.content)
+                                        onShowMessage("AI response copied to clipboard.")
+                                    }
+                                )
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(color = HairlineBorder)
+                    composerBar()
                 }
             }
         }

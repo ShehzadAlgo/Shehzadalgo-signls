@@ -11,7 +11,10 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 
-class AiSettingsStore(private val context: Context) {
+class AiSettingsStore(
+    private val context: Context,
+    private val customPrefs: SharedPreferences? = null
+) {
 
     private val masterKey by lazy {
         MasterKey.Builder(context)
@@ -20,10 +23,10 @@ class AiSettingsStore(private val context: Context) {
     }
 
     private val prefs: SharedPreferences by lazy {
-        EncryptedSharedPreferences.create(
+        customPrefs ?: EncryptedSharedPreferences.create(
+            context,
             "shehzad_algo_ai_prefs_secure",
             masterKey,
-            context,
             EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
         )

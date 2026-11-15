@@ -4,11 +4,15 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -17,6 +21,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.FileUpload
@@ -27,11 +33,16 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -67,6 +78,7 @@ fun LabScreen(
     storedReports: List<ValidationReportRecord>,
     liveDetails: Map<String, BacktestValidationResult>,
     validatingStrategyId: String?,
+    isTabletMode: Boolean = false,
     onValidateStrategy: (String) -> Unit,
     onImportCsv: (String, Timeframe, Uri) -> Unit
 ) {
@@ -77,56 +89,168 @@ fun LabScreen(
             onImportCsv("BTCUSDT", Timeframe.H4, uri)
         }
     }
+    var selectedStrategyId by rememberSaveable { mutableStateOf(StrategyRegistry.mvpStrategies.first().id) }
 
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
-        item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = SlateCard),
-                border = BorderStroke(1.dp, HairlineBorder),
-                modifier = Modifier.fillMaxWidth()
+    val labHeaderCard: @Composable () -> Unit = {
+        Card(
+            colors = CardDefaults.cardColors(containerColor = SlateCard),
+            border = BorderStroke(1.dp, HairlineBorder),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Column(
-                    modifier = Modifier.padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                Text(
+                    text = "STRATEGY VALIDATION LAB (HONESTY GATES)",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MeridianTeal
+                )
+                Text(
+                    text = "Every strategy runs cost-aware OOS simulation, 500x Monte Carlo (10% skip, 2x cost), +/-20% parameter stability, 95th-percentile random baseline, and the mandatory Causality Gate. Failing strategies are marked REJECTED.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = InkSecondary
+                )
+                OutlinedButton(
+                    onClick = { csvLauncher.launch(arrayOf("text/*", "text/csv", "application/octet-stream")) },
+                    border = BorderStroke(1.dp, HairlineBorder),
+                    modifier = Modifier.height(48.dp)
                 ) {
-                    Text(
-                        text = "STRATEGY VALIDATION LAB (HONESTY GATES)",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MeridianTeal
-                    )
-                    Text(
-                        text = "Every strategy runs cost-aware OOS simulation, 500x Monte Carlo (10% skip, 2x cost), +/-20% parameter stability, 95th-percentile random baseline, and the mandatory Causality Gate. Failing strategies are marked REJECTED.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = InkSecondary
-                    )
-                    OutlinedButton(
-                        onClick = { csvLauncher.launch(arrayOf("text/*", "text/csv", "application/octet-stream")) },
-                        border = BorderStroke(1.dp, HairlineBorder),
-                        modifier = Modifier.height(48.dp)
-                    ) {
-                        Icon(Icons.Outlined.FileUpload, contentDescription = null, tint = InkPrimary, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Import Historical CSV (BTCUSDT 4H)", color = InkPrimary, style = MaterialTheme.typography.labelMedium)
-                    }
+                    Icon(Icons.Outlined.FileUpload, contentDescription = null, tint = InkPrimary, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Import Historical CSV (BTCUSDT 4H)", color = InkPrimary, style = MaterialTheme.typography.labelMedium)
                 }
             }
         }
+    }
 
-        items(StrategyRegistry.mvpStrategies, key = { it.id }) { strategy ->
-            val stored = storedReports.firstOrNull { it.strategyId == strategy.id }
-            val live = liveDetails[strategy.id]
-            StrategyValidationCard(
-                strategy = strategy,
-                stored = stored,
-                live = live,
-                isValidating = validatingStrategyId == strategy.id,
-                anyValidating = validatingStrategyId != null,
-                onValidateClick = { onValidateStrategy(strategy.id) }
-            )
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val useHorizontalSplit = maxWidth >= 720.dp
+        val useStackedSplit = isTabletMode && !useHorizontalSplit
+
+        if (useHorizontalSplit || useStackedSplit) {
+            val selectedStrategy = StrategyRegistry.mvpStrategies.firstOrNull { it.id == selectedStrategyId }
+                ?: StrategyRegistry.mvpStrategies.first()
+
+            val masterList: @Composable (Modifier) -> Unit = { mod ->
+                LazyColumn(
+                    modifier = mod,
+                    contentPadding = PaddingValues(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    item { labHeaderCard() }
+                    items(StrategyRegistry.mvpStrategies, key = { it.id }) { strategy ->
+                        val stored = storedReports.firstOrNull { it.strategyId == strategy.id }
+                        val live = liveDetails[strategy.id]
+                        val lifecycle = live?.lifecycleStatus?.wire ?: stored?.lifecycleStatus ?: "DRAFT"
+                        val isSelected = strategy.id == selectedStrategy.id
+                        Card(
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (isSelected) GraphiteSurface else SlateCard
+                            ),
+                            border = BorderStroke(1.dp, if (isSelected) MeridianTeal else HairlineBorder),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { selectedStrategyId = strategy.id }
+                                .testTag("lab_strategy_row_${strategy.id}")
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(strategy.displayName, style = MaterialTheme.typography.titleMedium, color = InkPrimary)
+                                    Text(
+                                        text = "${strategy.id} • ${strategy.supportedTimeframes.joinToString { it.wire }}",
+                                        style = MonoMetricSmall,
+                                        color = InkSecondary
+                                    )
+                                }
+                                StatusPill(
+                                    text = lifecycle,
+                                    bg = when (lifecycle) {
+                                        "PAPER", "LIVE" -> BullEmeraldTint
+                                        "REJECTED", "SUSPENDED" -> BearCrimsonTint
+                                        else -> GraphiteSurface
+                                    },
+                                    fg = when (lifecycle) {
+                                        "PAPER", "LIVE" -> BullEmerald
+                                        "REJECTED", "SUSPENDED" -> BearCrimson
+                                        else -> InkSecondary
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            val inspectorPane: @Composable (Modifier) -> Unit = { mod ->
+                val stored = storedReports.firstOrNull { it.strategyId == selectedStrategy.id }
+                val live = liveDetails[selectedStrategy.id]
+                Column(
+                    modifier = mod
+                        .background(GraphiteSurface)
+                        .verticalScroll(rememberScrollState())
+                        .padding(12.dp)
+                        .testTag("tablet_lab_detail_pane"),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    StrategyValidationCard(
+                        strategy = selectedStrategy,
+                        stored = stored,
+                        live = live,
+                        isValidating = validatingStrategyId == selectedStrategy.id,
+                        anyValidating = validatingStrategyId != null,
+                        onValidateClick = { onValidateStrategy(selectedStrategy.id) }
+                    )
+                }
+            }
+
+            if (useHorizontalSplit) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag("tablet_dual_pane_lab")
+                ) {
+                    masterList(Modifier.weight(0.43f).fillMaxHeight())
+                    inspectorPane(Modifier.weight(0.57f).fillMaxHeight())
+                }
+            } else {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag("tablet_dual_pane_lab")
+                ) {
+                    masterList(Modifier.fillMaxWidth().weight(0.44f))
+                    HorizontalDivider(thickness = 1.dp, color = MeridianTeal.copy(alpha = 0.45f))
+                    inspectorPane(Modifier.fillMaxWidth().weight(0.56f))
+                }
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(16.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                item { labHeaderCard() }
+
+                items(StrategyRegistry.mvpStrategies, key = { it.id }) { strategy ->
+                    val stored = storedReports.firstOrNull { it.strategyId == strategy.id }
+                    val live = liveDetails[strategy.id]
+                    StrategyValidationCard(
+                        strategy = strategy,
+                        stored = stored,
+                        live = live,
+                        isValidating = validatingStrategyId == strategy.id,
+                        anyValidating = validatingStrategyId != null,
+                        onValidateClick = { onValidateStrategy(strategy.id) }
+                    )
+                }
+            }
         }
     }
 }
