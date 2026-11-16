@@ -27,10 +27,12 @@ import com.example.data.ai.SentimentRegime
 import com.example.data.ai.VerificationVerdict
 import com.example.data.firestore.SignalEventRecord
 import com.example.data.firestore.SignalRecord
+import com.example.data.market.MarketDataClient
 import com.example.data.market.MarketNewsClient
 import com.example.data.market.MarketNewsItem
 import com.example.domain.model.Candle
 import com.example.domain.model.Direction
+import com.example.domain.model.InstrumentUniverse
 import com.example.domain.model.RiskConfig
 import com.example.domain.model.Timeframe
 import com.example.quant.AlertSeverity
@@ -51,7 +53,14 @@ import com.example.ui.viewmodel.AiHubViewModel
 import com.example.ui.viewmodel.ScanStatus
 import com.example.ui.viewmodel.UiState
 import com.google.firebase.FirebaseApp
+import kotlinx.coroutines.runBlocking
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -619,5 +628,71 @@ class FullAppUiRobolectricTest {
 
         composeRule.onNodeWithTag("tablet_dual_pane_risk").assertExists()
         composeRule.onNodeWithTag("risk_pulse_strip").assertIsDisplayed()
+    }
+
+    @Test
+    fun marketDataClient_bypassesHttp451ViaOkxAndBinanceVision() = runBlocking {
+        val fakeClient = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val req = chain.request()
+                val host = req.url.host
+                val path = req.url.encodedPath
+                val (code, body) = when {
+                    host == "fapi.binance.com" || host == "api.binance.com" -> {
+                        451 to """{"code":0,"msg":"Service unavailable from a restricted location."}"""
+                    }
+                    host == "api.bybit.com" || host == "api.bytick.com" -> {
+                        403 to """{"retCode":403,"retMsg":"Forbidden"}"""
+                    }
+                    host == "www.okx.com" && path.contains("/market/candles") -> {
+                        if (req.url.queryParameter("instId") == "BNB-USDT") {
+                            503 to """{"code":"50011","msg":"Busy"}"""
+                        } else {
+                            200 to """{"code":"0","data":[["1794744000000","65359.2","65596.4","65188.1","65512.0","192.5","0","0","1"]]}"""
+                        }
+                    }
+                    host == "www.okx.com" && path.contains("funding-rate-history") -> {
+                        200 to """{"code":"0","data":[{"fundingTime":"1794729600000","fundingRate":"0.0001"}]}"""
+                    }
+                    host == "data-api.binance.vision" && path.contains("/klines") -> {
+                        200 to """[[1794744000000,"590.0","598.5","589.1","595.98","1200.5",1794747599999,"715000",100,"600","357000","0"]]"""
+                    }
+                    host == "data-api.binance.vision" && path.contains("/ticker/price") -> {
+                        200 to """[{"symbol":"BTCUSDT","price":"65512.0"},{"symbol":"ETHUSDT","price":"1831.5"}]"""
+                    }
+                    host == "api.frankfurter.dev" -> {
+                        200 to """{"rates":{"EUR":0.92,"GBP":0.79,"JPY":154.0}}"""
+                    }
+                    else -> 404 to "{}"
+                }
+                Response.Builder()
+                    .request(req)
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(code)
+                    .message(if (code == 200) "OK" else "Blocked")
+                    .body(body.toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+            .build()
+
+        val client = MarketDataClient(httpClient = fakeClient)
+
+        val btc = InstrumentUniverse.find("BTCUSDT")!!
+        val btcBundle = client.fetchInstrumentBundle(btc, Timeframe.H1, limit = 50)
+        assertNull(btcBundle.errorMessage)
+        assertEquals("OKX v5 Public", btcBundle.providerName)
+        assertEquals(65512.0, btcBundle.candles.single().close, 0.01)
+        assertEquals(1, btcBundle.fundingHistory.size)
+
+        val bnb = InstrumentUniverse.find("BNBUSDT")!!
+        val bnbBundle = client.fetchInstrumentBundle(bnb, Timeframe.H1, limit = 50)
+        assertNull(bnbBundle.errorMessage)
+        assertEquals("Binance Vision Public", bnbBundle.providerName)
+        assertEquals(595.98, bnbBundle.candles.single().close, 0.01)
+
+        val rates = client.fetchSpotFxRatesUsd()
+        assertEquals(65512.0, rates["BTCUSDT"] ?: 0.0, 0.01)
+        assertEquals(1831.5, rates["ETHUSDT"] ?: 0.0, 0.01)
+        assertEquals(154.0, rates["USDJPY"] ?: 0.0, 0.01)
     }
 }

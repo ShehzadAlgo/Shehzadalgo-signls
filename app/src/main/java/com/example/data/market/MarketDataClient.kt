@@ -78,8 +78,15 @@ class MarketDataClient(
                 r.optDouble("NZD").takeIf { it > 0.0 }?.let { rates["NZDUSD"] = 1.0 / it }
             }
         } catch (_: Exception) {
-            // Keep reference rates if network unavailable
+            // Keep reference FX rates if network unavailable
         }
+
+        // Enrich with unblocked live Crypto spot prices (Binance Data Vision -> OKX fallback, zero HTTP 451)
+        val cryptoRates = runCatching { fetchCryptoSpotPricesViaBinanceVision() }.getOrNull()
+            ?.takeIf { it.isNotEmpty() }
+            ?: runCatching { fetchCryptoSpotPricesViaOkx() }.getOrDefault(emptyMap())
+        rates.putAll(cryptoRates)
+
         rates
     }
 
@@ -151,44 +158,7 @@ class MarketDataClient(
         }
 
         if (instrument.assetClass == AssetClass.CRYPTO) {
-            val primary = fetchCryptoBundle(instrument, timeframe, limit, nowMs)
-            if (primary.candles.isNotEmpty()) return@withContext primary
-
-            // Fallback to Binance Spot klines
-            val spotCandles = runCatching {
-                fetchBinanceSpotKlines(instrument.binanceSymbol, timeframe, limit)
-            }.getOrNull().orEmpty()
-            if (spotCandles.isNotEmpty()) {
-                return@withContext MarketFeedBundle(
-                    instrument = instrument,
-                    timeframe = timeframe,
-                    candles = spotCandles,
-                    dailyCandles = if (timeframe == Timeframe.D1) spotCandles else emptyList(),
-                    fundingHistory = emptyList(),
-                    openInterestHistory = emptyList(),
-                    providerName = "Binance Spot Public",
-                    fetchedAtEpochMs = System.currentTimeMillis()
-                )
-            }
-
-            // Last fallback: Yahoo Finance CRYPTO-USD ticker
-            val yahooCrypto = runCatching {
-                fetchYahooFxCandles("${instrument.baseCurrency}-USD", timeframe)
-            }.getOrNull().orEmpty()
-            if (yahooCrypto.isNotEmpty()) {
-                return@withContext MarketFeedBundle(
-                    instrument = instrument,
-                    timeframe = timeframe,
-                    candles = yahooCrypto,
-                    dailyCandles = emptyList(),
-                    fundingHistory = emptyList(),
-                    openInterestHistory = emptyList(),
-                    providerName = "Yahoo Finance Chart v8",
-                    fetchedAtEpochMs = System.currentTimeMillis()
-                )
-            }
-
-            return@withContext primary
+            return@withContext fetchCryptoBundle(instrument, timeframe, limit, nowMs)
         }
 
         val fxBundle = fetchFxBundle(instrument, timeframe, nowMs)
@@ -362,9 +332,52 @@ class MarketDataClient(
         limit: Int,
         nowMs: Long
     ): MarketFeedBundle {
-        // Try Bybit v5 first, then Binance USD-M Futures
-        val bybitCandles = runCatching { fetchBybitKlines(instrument.bybitSymbol, timeframe, limit) }.getOrNull()
-        if (!bybitCandles.isNullOrEmpty()) {
+        // Multi-provider globally unblocked waterfall (avoids geo-restricted HTTP 451/403 endpoints)
+        val attemptErrors = mutableListOf<String>()
+
+        // 1. OKX v5 Public Spot/Perp candles + OKX Swap funding (globally unblocked, HTTP 200)
+        val okxResult = runCatching { fetchOkxKlines(instrument.baseCurrency, timeframe, limit) }
+        val okxCandles = okxResult.getOrNull().orEmpty()
+        if (okxCandles.isNotEmpty()) {
+            val funding = runCatching { fetchOkxFunding(instrument.baseCurrency) }.getOrDefault(emptyList())
+            val oi = runCatching { fetchBybitOpenInterest(instrument.bybitSymbol, timeframe) }.getOrDefault(emptyList())
+            return MarketFeedBundle(
+                instrument = instrument,
+                timeframe = timeframe,
+                candles = okxCandles,
+                dailyCandles = if (timeframe == Timeframe.D1) okxCandles else emptyList(),
+                fundingHistory = funding,
+                openInterestHistory = oi,
+                providerName = "OKX v5 Public",
+                fetchedAtEpochMs = System.currentTimeMillis()
+            )
+        }
+        okxResult.exceptionOrNull()?.localizedMessage?.let { attemptErrors.add("OKX: $it") }
+
+        // 2. Binance Data Vision CDN (official Binance market-data mirror with NO HTTP 451 geo-block)
+        val visionResult = runCatching { fetchBinanceVisionKlines(instrument.binanceSymbol, timeframe, limit) }
+        val visionCandles = visionResult.getOrNull().orEmpty()
+        if (visionCandles.isNotEmpty()) {
+            val funding = runCatching { fetchOkxFunding(instrument.baseCurrency) }
+                .getOrNull()?.takeIf { it.isNotEmpty() }
+                ?: runCatching { fetchBybitFunding(instrument.bybitSymbol) }.getOrDefault(emptyList())
+            return MarketFeedBundle(
+                instrument = instrument,
+                timeframe = timeframe,
+                candles = visionCandles,
+                dailyCandles = if (timeframe == Timeframe.D1) visionCandles else emptyList(),
+                fundingHistory = funding,
+                openInterestHistory = emptyList(),
+                providerName = "Binance Vision Public",
+                fetchedAtEpochMs = System.currentTimeMillis()
+            )
+        }
+        visionResult.exceptionOrNull()?.localizedMessage?.let { attemptErrors.add("Vision: $it") }
+
+        // 3. Bybit v5 (tries global mirror api.bytick.com + api.bybit.com)
+        val bybitResult = runCatching { fetchBybitKlines(instrument.bybitSymbol, timeframe, limit) }
+        val bybitCandles = bybitResult.getOrNull().orEmpty()
+        if (bybitCandles.isNotEmpty()) {
             val funding = runCatching { fetchBybitFunding(instrument.bybitSymbol) }.getOrDefault(emptyList())
             val oi = runCatching { fetchBybitOpenInterest(instrument.bybitSymbol, timeframe) }.getOrDefault(emptyList())
             return MarketFeedBundle(
@@ -378,9 +391,62 @@ class MarketDataClient(
                 fetchedAtEpochMs = System.currentTimeMillis()
             )
         }
+        bybitResult.exceptionOrNull()?.localizedMessage?.let { attemptErrors.add("Bybit: $it") }
 
-        val binanceResult = runCatching { fetchBinanceKlines(instrument.binanceSymbol, timeframe, limit) }
-        val binanceCandles = binanceResult.getOrNull().orEmpty()
+        // 4. Coinbase Exchange Public (US & globally accessible)
+        val coinbaseResult = runCatching { fetchCoinbaseKlines(instrument.baseCurrency, timeframe, limit) }
+        val coinbaseCandles = coinbaseResult.getOrNull().orEmpty()
+        if (coinbaseCandles.isNotEmpty()) {
+            val funding = runCatching { fetchOkxFunding(instrument.baseCurrency) }.getOrDefault(emptyList())
+            return MarketFeedBundle(
+                instrument = instrument,
+                timeframe = timeframe,
+                candles = coinbaseCandles,
+                dailyCandles = if (timeframe == Timeframe.D1) coinbaseCandles else emptyList(),
+                fundingHistory = funding,
+                openInterestHistory = emptyList(),
+                providerName = "Coinbase Public",
+                fetchedAtEpochMs = System.currentTimeMillis()
+            )
+        }
+        coinbaseResult.exceptionOrNull()?.localizedMessage?.let { attemptErrors.add("Coinbase: $it") }
+
+        // 5. Kraken Public OHLC
+        val krakenCandles = runCatching { fetchKrakenKlines(instrument.baseCurrency, timeframe) }.getOrNull().orEmpty()
+        if (krakenCandles.isNotEmpty()) {
+            return MarketFeedBundle(
+                instrument = instrument,
+                timeframe = timeframe,
+                candles = krakenCandles,
+                dailyCandles = if (timeframe == Timeframe.D1) krakenCandles else emptyList(),
+                fundingHistory = emptyList(),
+                openInterestHistory = emptyList(),
+                providerName = "Kraken Public",
+                fetchedAtEpochMs = System.currentTimeMillis()
+            )
+        }
+
+        // 6. Yahoo Finance Crypto-USD chart fallback
+        val yahooCandles = runCatching {
+            fetchYahooFxCandles("${instrument.baseCurrency}-USD", timeframe)
+        }.getOrNull().orEmpty()
+        if (yahooCandles.isNotEmpty()) {
+            return MarketFeedBundle(
+                instrument = instrument,
+                timeframe = timeframe,
+                candles = yahooCandles,
+                dailyCandles = if (timeframe == Timeframe.D1) yahooCandles else emptyList(),
+                fundingHistory = emptyList(),
+                openInterestHistory = emptyList(),
+                providerName = "Yahoo Finance Chart v8",
+                fetchedAtEpochMs = System.currentTimeMillis()
+            )
+        }
+
+        // 7. Direct Binance Futures / Spot last fallback (skips exposing raw HTTP 451 when regional restriction applies)
+        val binanceCandles = runCatching { fetchBinanceKlines(instrument.binanceSymbol, timeframe, limit) }.getOrNull()
+            ?.takeIf { it.isNotEmpty() }
+            ?: runCatching { fetchBinanceSpotKlines(instrument.binanceSymbol, timeframe, limit) }.getOrNull().orEmpty()
         if (binanceCandles.isNotEmpty()) {
             val funding = runCatching { fetchBinanceFunding(instrument.binanceSymbol) }.getOrDefault(emptyList())
             val oi = runCatching { fetchBinanceOpenInterest(instrument.binanceSymbol, timeframe) }.getOrDefault(emptyList())
@@ -396,6 +462,9 @@ class MarketDataClient(
             )
         }
 
+        val summaryErr = attemptErrors.take(2).joinToString(" | ").ifBlank {
+            "Unable to reach crypto market data feeds. Check internet connection or import CSV."
+        }
         return MarketFeedBundle(
             instrument = instrument,
             timeframe = timeframe,
@@ -405,7 +474,7 @@ class MarketDataClient(
             openInterestHistory = emptyList(),
             providerName = "Crypto Public Feed",
             fetchedAtEpochMs = nowMs,
-            errorMessage = binanceResult.exceptionOrNull()?.localizedMessage ?: "Unable to reach Bybit or Binance public endpoints."
+            errorMessage = summaryErr
         )
     }
 
@@ -472,19 +541,71 @@ class MarketDataClient(
             Timeframe.H4 -> "240"
             Timeframe.D1 -> "D"
         }
-        val url = "https://api.bybit.com/v5/market/kline?category=linear&symbol=$symbol&interval=$interval&limit=${limit.coerceIn(50, 1000)}"
-        val req = Request.Builder().url(url).build()
+        val cappedLimit = limit.coerceIn(50, 1000)
+        val hosts = listOf("https://api.bytick.com", "https://api.bybit.com")
+        var lastErr: Throwable? = null
+        for (host in hosts) {
+            try {
+                val url = "$host/v5/market/kline?category=linear&symbol=$symbol&interval=$interval&limit=$cappedLimit"
+                val req = Request.Builder().url(url).build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) error("Bybit HTTP ${resp.code}")
+                    val root = JSONObject(resp.body?.string() ?: error("Empty Bybit body"))
+                    if (root.optInt("retCode", -1) != 0) error("Bybit error: ${root.optString("retMsg")}")
+                    val list = root.getJSONObject("result").getJSONArray("list")
+                    val tfMs = tf.durationMinutes * 60_000L
+                    val out = ArrayList<Candle>(list.length())
+                    for (i in list.length() - 1 downTo 0) {
+                        val row = list.getJSONArray(i)
+                        val openMs = row.getString(0).toLong()
+                        out.add(
+                            Candle(
+                                openTimeEpochMs = openMs,
+                                closeTimeEpochMs = openMs + tfMs,
+                                open = row.getString(1).toDouble(),
+                                high = row.getString(2).toDouble(),
+                                low = row.getString(3).toDouble(),
+                                close = row.getString(4).toDouble(),
+                                volume = row.getString(5).toDouble(),
+                                isClosed = true
+                            )
+                        )
+                    }
+                    return out
+                }
+            } catch (t: Throwable) {
+                lastErr = t
+            }
+        }
+        throw (lastErr ?: IllegalStateException("Bybit market endpoint unreachable"))
+    }
+
+    private fun fetchOkxKlines(baseTicker: String, tf: Timeframe, limit: Int): List<Candle> {
+        val bar = when (tf) {
+            Timeframe.M15 -> "15m"
+            Timeframe.H1 -> "1H"
+            Timeframe.H4 -> "4H"
+            Timeframe.D1 -> "1Dutc"
+        }
+        val instId = "${baseTicker.uppercase()}-USDT"
+        val capped = limit.coerceIn(50, 300)
+        val url = "https://www.okx.com/api/v5/market/candles?instId=$instId&bar=$bar&limit=$capped"
+        val req = Request.Builder()
+            .url(url)
+            .header("Accept", "application/json")
+            .build()
         httpClient.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) error("Bybit HTTP ${resp.code}")
-            val root = JSONObject(resp.body?.string() ?: error("Empty Bybit body"))
-            if (root.optInt("retCode", -1) != 0) error("Bybit error: ${root.optString("retMsg")}")
-            val list = root.getJSONObject("result").getJSONArray("list")
+            if (!resp.isSuccessful) error("OKX HTTP ${resp.code}")
+            val root = JSONObject(resp.body?.string() ?: error("Empty OKX body"))
+            if (root.optString("code") != "0") error("OKX error: ${root.optString("msg")}")
+            val data = root.getJSONArray("data")
             val tfMs = tf.durationMinutes * 60_000L
-            val out = ArrayList<Candle>(list.length())
-            // Bybit returns newest first
-            for (i in list.length() - 1 downTo 0) {
-                val row = list.getJSONArray(i)
+            val out = ArrayList<Candle>(data.length())
+            // OKX returns newest first
+            for (i in data.length() - 1 downTo 0) {
+                val row = data.getJSONArray(i)
                 val openMs = row.getString(0).toLong()
+                val confirm = row.optString(8, "1")
                 out.add(
                     Candle(
                         openTimeEpochMs = openMs,
@@ -494,6 +615,123 @@ class MarketDataClient(
                         low = row.getString(3).toDouble(),
                         close = row.getString(4).toDouble(),
                         volume = row.getString(5).toDouble(),
+                        isClosed = confirm != "0"
+                    )
+                )
+            }
+            return out
+        }
+    }
+
+    private fun fetchOkxFunding(baseTicker: String): List<FundingPoint> {
+        val instId = "${baseTicker.uppercase()}-USDT-SWAP"
+        val url = "https://www.okx.com/api/v5/public/funding-rate-history?instId=$instId&limit=100"
+        val req = Request.Builder().url(url).build()
+        httpClient.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) return emptyList()
+            val root = JSONObject(resp.body?.string() ?: return emptyList())
+            if (root.optString("code") != "0") return emptyList()
+            val data = root.optJSONArray("data") ?: return emptyList()
+            val out = ArrayList<FundingPoint>(data.length())
+            for (i in data.length() - 1 downTo 0) {
+                val obj = data.getJSONObject(i)
+                val t = obj.optString("fundingTime").toLongOrNull() ?: continue
+                val rate = obj.optString("fundingRate").toDoubleOrNull() ?: continue
+                out.add(FundingPoint(timestampEpochMs = t, fundingRate = rate))
+            }
+            return out
+        }
+    }
+
+    private fun fetchBinanceVisionKlines(symbol: String, tf: Timeframe, limit: Int): List<Candle> {
+        val interval = when (tf) {
+            Timeframe.M15 -> "15m"
+            Timeframe.H1 -> "1h"
+            Timeframe.H4 -> "4h"
+            Timeframe.D1 -> "1d"
+        }
+        val url = "https://data-api.binance.vision/api/v3/klines?symbol=$symbol&interval=$interval&limit=${limit.coerceIn(50, 1000)}"
+        val req = Request.Builder().url(url).build()
+        httpClient.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) error("Binance Vision HTTP ${resp.code}")
+            val arr = JSONArray(resp.body?.string() ?: error("Empty Binance Vision body"))
+            return parseBinanceArrayCandles(arr)
+        }
+    }
+
+    private fun fetchCoinbaseKlines(baseTicker: String, tf: Timeframe, limit: Int): List<Candle> {
+        val granularitySec = when (tf) {
+            Timeframe.M15 -> 900
+            Timeframe.H1 -> 3600
+            Timeframe.H4 -> 3600 // Resampled cleanly to 4H below
+            Timeframe.D1 -> 86400
+        }
+        val productId = "${baseTicker.uppercase()}-USD"
+        val url = "https://api.exchange.coinbase.com/products/$productId/candles?granularity=$granularitySec"
+        val req = Request.Builder()
+            .url(url)
+            .header("Accept", "application/json")
+            .header("User-Agent", "ShehzadAlgo/1.0")
+            .build()
+        httpClient.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) error("Coinbase HTTP ${resp.code}")
+            val arr = JSONArray(resp.body?.string() ?: error("Empty Coinbase body"))
+            val stepMs = granularitySec * 1000L
+            val out = ArrayList<Candle>(arr.length())
+            // Coinbase returns newest first: [timeSec, low, high, open, close, volume]
+            for (i in arr.length() - 1 downTo 0) {
+                val row = arr.getJSONArray(i)
+                val openMs = row.getLong(0) * 1000L
+                out.add(
+                    Candle(
+                        openTimeEpochMs = openMs,
+                        closeTimeEpochMs = openMs + stepMs,
+                        open = row.getDouble(3),
+                        high = row.getDouble(2),
+                        low = row.getDouble(1),
+                        close = row.getDouble(4),
+                        volume = row.getDouble(5),
+                        isClosed = true
+                    )
+                )
+            }
+            val parsed = if (tf == Timeframe.H4) resampleTo4H(out) else out
+            return parsed.takeLast(limit)
+        }
+    }
+
+    private fun fetchKrakenKlines(baseTicker: String, tf: Timeframe): List<Candle> {
+        val krakenBase = if (baseTicker.equals("BTC", ignoreCase = true)) "XBT" else baseTicker.uppercase()
+        val interval = when (tf) {
+            Timeframe.M15 -> 15
+            Timeframe.H1 -> 60
+            Timeframe.H4 -> 240
+            Timeframe.D1 -> 1440
+        }
+        val url = "https://api.kraken.com/0/public/OHLC?pair=${krakenBase}USD&interval=$interval"
+        val req = Request.Builder().url(url).build()
+        httpClient.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) error("Kraken HTTP ${resp.code}")
+            val root = JSONObject(resp.body?.string() ?: error("Empty Kraken body"))
+            val errs = root.optJSONArray("error")
+            if (errs != null && errs.length() > 0) error("Kraken error: ${errs.optString(0)}")
+            val res = root.getJSONObject("result")
+            val pairKey = res.keys().asSequence().firstOrNull { it != "last" } ?: return emptyList()
+            val arr = res.getJSONArray(pairKey)
+            val tfMs = tf.durationMinutes * 60_000L
+            val out = ArrayList<Candle>(arr.length())
+            for (i in 0 until arr.length()) {
+                val row = arr.getJSONArray(i)
+                val openMs = row.getLong(0) * 1000L
+                out.add(
+                    Candle(
+                        openTimeEpochMs = openMs,
+                        closeTimeEpochMs = openMs + tfMs,
+                        open = row.getString(1).toDouble(),
+                        high = row.getString(2).toDouble(),
+                        low = row.getString(3).toDouble(),
+                        close = row.getString(4).toDouble(),
+                        volume = row.getString(6).toDouble(),
                         isClosed = true
                     )
                 )
@@ -502,26 +740,94 @@ class MarketDataClient(
         }
     }
 
-    private fun fetchBybitFunding(symbol: String): List<FundingPoint> {
-        val url = "https://api.bybit.com/v5/market/funding/history?category=linear&symbol=$symbol&limit=200"
+    private fun fetchCryptoSpotPricesViaBinanceVision(): Map<String, Double> {
+        val url = "https://data-api.binance.vision/api/v3/ticker/price?symbols=%5B%22BTCUSDT%22,%22ETHUSDT%22,%22SOLUSDT%22,%22BNBUSDT%22,%22XRPUSDT%22%5D"
         val req = Request.Builder().url(url).build()
         httpClient.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) return emptyList()
-            val root = JSONObject(resp.body?.string() ?: return emptyList())
-            if (root.optInt("retCode", -1) != 0) return emptyList()
-            val list = root.getJSONObject("result").getJSONArray("list")
-            val out = ArrayList<FundingPoint>(list.length())
-            for (i in list.length() - 1 downTo 0) {
-                val obj = list.getJSONObject(i)
-                out.add(
-                    FundingPoint(
-                        timestampEpochMs = obj.getString("fundingRateTimestamp").toLong(),
-                        fundingRate = obj.getString("fundingRate").toDouble()
-                    )
-                )
+            if (!resp.isSuccessful) return emptyMap()
+            val arr = JSONArray(resp.body?.string() ?: return emptyMap())
+            val map = mutableMapOf<String, Double>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val sym = obj.optString("symbol")
+                val price = obj.optString("price").toDoubleOrNull() ?: continue
+                if (sym.isNotBlank() && price > 0.0) {
+                    map[sym] = price
+                }
             }
-            return out
+            return map
         }
+    }
+
+    private fun fetchCryptoSpotPricesViaOkx(): Map<String, Double> {
+        val url = "https://www.okx.com/api/v5/market/index-tickers?quoteCcy=USD"
+        val req = Request.Builder().url(url).build()
+        httpClient.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) return emptyMap()
+            val root = JSONObject(resp.body?.string() ?: return emptyMap())
+            if (root.optString("code") != "0") return emptyMap()
+            val data = root.optJSONArray("data") ?: return emptyList<Pair<String, Double>>().toMap()
+            val map = mutableMapOf<String, Double>()
+            val wanted = setOf("BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD")
+            for (i in 0 until data.length()) {
+                val obj = data.optJSONObject(i) ?: continue
+                val instId = obj.optString("instId")
+                if (instId !in wanted) continue
+                val price = obj.optString("idxPx").toDoubleOrNull() ?: continue
+                if (price > 0.0) {
+                    map[instId.removeSuffix("-USD") + "USDT"] = price
+                }
+            }
+            return map
+        }
+    }
+
+    private fun parseBinanceArrayCandles(arr: JSONArray): List<Candle> {
+        val out = ArrayList<Candle>(arr.length())
+        for (i in 0 until arr.length()) {
+            val row = arr.getJSONArray(i)
+            out.add(
+                Candle(
+                    openTimeEpochMs = row.getLong(0),
+                    closeTimeEpochMs = row.getLong(6) + 1L,
+                    open = row.getString(1).toDouble(),
+                    high = row.getString(2).toDouble(),
+                    low = row.getString(3).toDouble(),
+                    close = row.getString(4).toDouble(),
+                    volume = row.getString(5).toDouble(),
+                    isClosed = true
+                )
+            )
+        }
+        return out
+    }
+
+    private fun fetchBybitFunding(symbol: String): List<FundingPoint> {
+        for (host in listOf("https://api.bytick.com", "https://api.bybit.com")) {
+            val res = runCatching {
+                val url = "$host/v5/market/funding/history?category=linear&symbol=$symbol&limit=200"
+                val req = Request.Builder().url(url).build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use emptyList()
+                    val root = JSONObject(resp.body?.string() ?: return@use emptyList())
+                    if (root.optInt("retCode", -1) != 0) return@use emptyList()
+                    val list = root.getJSONObject("result").getJSONArray("list")
+                    val out = ArrayList<FundingPoint>(list.length())
+                    for (i in list.length() - 1 downTo 0) {
+                        val obj = list.getJSONObject(i)
+                        out.add(
+                            FundingPoint(
+                                timestampEpochMs = obj.getString("fundingRateTimestamp").toLong(),
+                                fundingRate = obj.getString("fundingRate").toDouble()
+                            )
+                        )
+                    }
+                    out
+                }
+            }.getOrDefault(emptyList())
+            if (res.isNotEmpty()) return res
+        }
+        return emptyList()
     }
 
     private fun fetchBybitOpenInterest(symbol: String, tf: Timeframe): List<OpenInterestPoint> {
@@ -531,25 +837,31 @@ class MarketDataClient(
             Timeframe.H4 -> "4h"
             Timeframe.D1 -> "1d"
         }
-        val url = "https://api.bybit.com/v5/market/open-interest?category=linear&symbol=$symbol&intervalTime=$interval&limit=200"
-        val req = Request.Builder().url(url).build()
-        httpClient.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) return emptyList()
-            val root = JSONObject(resp.body?.string() ?: return emptyList())
-            if (root.optInt("retCode", -1) != 0) return emptyList()
-            val list = root.getJSONObject("result").getJSONArray("list")
-            val out = ArrayList<OpenInterestPoint>(list.length())
-            for (i in list.length() - 1 downTo 0) {
-                val obj = list.getJSONObject(i)
-                out.add(
-                    OpenInterestPoint(
-                        timestampEpochMs = obj.getString("timestamp").toLong(),
-                        openInterest = obj.getString("openInterest").toDouble()
-                    )
-                )
-            }
-            return out
+        for (host in listOf("https://api.bytick.com", "https://api.bybit.com")) {
+            val res = runCatching {
+                val url = "$host/v5/market/open-interest?category=linear&symbol=$symbol&intervalTime=$interval&limit=200"
+                val req = Request.Builder().url(url).build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use emptyList()
+                    val root = JSONObject(resp.body?.string() ?: return@use emptyList())
+                    if (root.optInt("retCode", -1) != 0) return@use emptyList()
+                    val list = root.getJSONObject("result").getJSONArray("list")
+                    val out = ArrayList<OpenInterestPoint>(list.length())
+                    for (i in list.length() - 1 downTo 0) {
+                        val obj = list.getJSONObject(i)
+                        out.add(
+                            OpenInterestPoint(
+                                timestampEpochMs = obj.getString("timestamp").toLong(),
+                                openInterest = obj.getString("openInterest").toDouble()
+                            )
+                        )
+                    }
+                    out
+                }
+            }.getOrDefault(emptyList())
+            if (res.isNotEmpty()) return res
         }
+        return emptyList()
     }
 
     private fun fetchBinanceKlines(symbol: String, tf: Timeframe, limit: Int): List<Candle> {
@@ -564,23 +876,7 @@ class MarketDataClient(
         httpClient.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) error("Binance HTTP ${resp.code}")
             val arr = JSONArray(resp.body?.string() ?: error("Empty Binance body"))
-            val out = ArrayList<Candle>(arr.length())
-            for (i in 0 until arr.length()) {
-                val row = arr.getJSONArray(i)
-                out.add(
-                    Candle(
-                        openTimeEpochMs = row.getLong(0),
-                        closeTimeEpochMs = row.getLong(6) + 1L,
-                        open = row.getString(1).toDouble(),
-                        high = row.getString(2).toDouble(),
-                        low = row.getString(3).toDouble(),
-                        close = row.getString(4).toDouble(),
-                        volume = row.getString(5).toDouble(),
-                        isClosed = true
-                    )
-                )
-            }
-            return out
+            return parseBinanceArrayCandles(arr)
         }
     }
 
@@ -596,23 +892,7 @@ class MarketDataClient(
         httpClient.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) error("Binance Spot HTTP ${resp.code}")
             val arr = JSONArray(resp.body?.string() ?: error("Empty Binance Spot body"))
-            val out = ArrayList<Candle>(arr.length())
-            for (i in 0 until arr.length()) {
-                val row = arr.getJSONArray(i)
-                out.add(
-                    Candle(
-                        openTimeEpochMs = row.getLong(0),
-                        closeTimeEpochMs = row.getLong(6) + 1L,
-                        open = row.getString(1).toDouble(),
-                        high = row.getString(2).toDouble(),
-                        low = row.getString(3).toDouble(),
-                        close = row.getString(4).toDouble(),
-                        volume = row.getString(5).toDouble(),
-                        isClosed = true
-                    )
-                )
-            }
-            return out
+            return parseBinanceArrayCandles(arr)
         }
     }
 
@@ -655,47 +935,56 @@ class MarketDataClient(
             Timeframe.H4 -> "1h" to "180d"
             Timeframe.D1 -> "1d" to "2y"
         }
-        val url = "https://query1.finance.yahoo.com/v8/finance/chart/$yahooTicker?interval=$interval&range=$range"
-        val req = Request.Builder()
-            .url(url)
-            .header("User-Agent", "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36")
-            .build()
+        val hosts = listOf("https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com")
+        var lastErr: Throwable? = null
+        for (host in hosts) {
+            try {
+                val url = "$host/v8/finance/chart/$yahooTicker?interval=$interval&range=$range"
+                val req = Request.Builder()
+                    .url(url)
+                    .header("User-Agent", "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36")
+                    .build()
 
-        httpClient.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) error("Yahoo HTTP ${resp.code}")
-            val root = JSONObject(resp.body?.string() ?: error("Empty Yahoo body"))
-            val resultArr = root.getJSONObject("chart").getJSONArray("result")
-            if (resultArr.length() == 0) return emptyList()
-            val res = resultArr.getJSONObject(0)
-            val timestamps = res.getJSONArray("timestamp")
-            val quote = res.getJSONObject("indicators").getJSONArray("quote").getJSONObject(0)
-            val opens = quote.getJSONArray("open")
-            val highs = quote.getJSONArray("high")
-            val lows = quote.getJSONArray("low")
-            val closes = quote.getJSONArray("close")
-            val vols = quote.optJSONArray("volume")
+                httpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) error("Yahoo HTTP ${resp.code}")
+                    val root = JSONObject(resp.body?.string() ?: error("Empty Yahoo body"))
+                    val resultArr = root.getJSONObject("chart").getJSONArray("result")
+                    if (resultArr.length() == 0) return emptyList()
+                    val res = resultArr.getJSONObject(0)
+                    val timestamps = res.getJSONArray("timestamp")
+                    val quote = res.getJSONObject("indicators").getJSONArray("quote").getJSONObject(0)
+                    val opens = quote.getJSONArray("open")
+                    val highs = quote.getJSONArray("high")
+                    val lows = quote.getJSONArray("low")
+                    val closes = quote.getJSONArray("close")
+                    val vols = quote.optJSONArray("volume")
 
-            val baseStepMs = if (tf == Timeframe.H4) 3600_000L else tf.durationMinutes * 60_000L
-            val parsed = ArrayList<Candle>(timestamps.length())
-            for (i in 0 until timestamps.length()) {
-                if (opens.isNull(i) || highs.isNull(i) || lows.isNull(i) || closes.isNull(i)) continue
-                val openMs = timestamps.getLong(i) * 1000L
-                val vol = if (vols != null && !vols.isNull(i)) vols.optDouble(i, 0.0) else 0.0
-                parsed.add(
-                    Candle(
-                        openTimeEpochMs = openMs,
-                        closeTimeEpochMs = openMs + baseStepMs,
-                        open = opens.getDouble(i),
-                        high = highs.getDouble(i),
-                        low = lows.getDouble(i),
-                        close = closes.getDouble(i),
-                        volume = vol,
-                        isClosed = true
-                    )
-                )
+                    val baseStepMs = if (tf == Timeframe.H4) 3600_000L else tf.durationMinutes * 60_000L
+                    val parsed = ArrayList<Candle>(timestamps.length())
+                    for (i in 0 until timestamps.length()) {
+                        if (opens.isNull(i) || highs.isNull(i) || lows.isNull(i) || closes.isNull(i)) continue
+                        val openMs = timestamps.getLong(i) * 1000L
+                        val vol = if (vols != null && !vols.isNull(i)) vols.optDouble(i, 0.0) else 0.0
+                        parsed.add(
+                            Candle(
+                                openTimeEpochMs = openMs,
+                                closeTimeEpochMs = openMs + baseStepMs,
+                                open = opens.getDouble(i),
+                                high = highs.getDouble(i),
+                                low = lows.getDouble(i),
+                                close = closes.getDouble(i),
+                                volume = vol,
+                                isClosed = true
+                            )
+                        )
+                    }
+                    return if (tf == Timeframe.H4) resampleTo4H(parsed) else parsed
+                }
+            } catch (t: Throwable) {
+                lastErr = t
             }
-            return if (tf == Timeframe.H4) resampleTo4H(parsed) else parsed
         }
+        throw (lastErr ?: IllegalStateException("Yahoo chart endpoint unreachable"))
     }
 
     private fun resampleTo4H(hourly: List<Candle>): List<Candle> {
